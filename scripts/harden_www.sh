@@ -63,7 +63,10 @@ while IFS= read -r user; do
         echo "USER $user : $NEW_PASS" >> "$CRED_FILE"
         usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true
         passwd -l "$user" 2>/dev/null || true
-        echo "  [-] Locked shell + password + account: $user"
+        for _grp in sudo wheel docker disk shadow adm lxd lxc kvm libvirt; do
+            gpasswd -d "$user" "$_grp" 2>/dev/null || true
+        done
+        echo "  [-] Locked + stripped privileged groups: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
 
