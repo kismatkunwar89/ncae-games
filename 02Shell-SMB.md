@@ -87,6 +87,18 @@ ET POLICY        — suspicious tool usage (ncat, netcat)
 ATTACK RESPONSE  — successful exploit indicator
 ```
 
+### oscap — Compliance Audit (run after harden script, scan only)
+```bash
+sudo dnf install -y openscap-scanner scap-security-guide
+sudo oscap xccdf eval \
+  --profile xccdf_org.ssgproject.content_profile_cis \
+  --report /tmp/oscap_shell.html \
+  /usr/share/xml/scap/ssg/content/ssg-rl9-ds.xml 2>/dev/null
+# Review failures — fix anything critical that harden script missed
+grep "fail" /tmp/oscap_shell.html | grep -v "notapplicable" | head -20
+```
+> Scan only — never run `--remediate` during competition, it can break Samba/SSH configs.
+
 ### Run backdoor hunt every 30 min
 ```bash
 sudo bash /opt/ncae/backdoor_hunt.sh
