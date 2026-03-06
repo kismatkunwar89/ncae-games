@@ -30,7 +30,9 @@ HOSTNAME_SHORT=$(hostname | tr '.' '_')
 LOCAL_BACKUP="/root/ncae_config_backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Allow overriding backup VM IP as first argument; default to 192.168.t.15
-BACKUP_VM_IP="${1:-192.168.${TEAM}.15}"
+# Uses NCAE_LAN_BASE if set (inherited from deploy_all.sh) for topology flexibility
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-192.168.${TEAM}}"
+BACKUP_VM_IP="${1:-${NCAE_LAN_BASE}.15}"
 
 echo "[$(date)] === Config Backup START - $HOSTNAME_SHORT ==="
 mkdir -p "$LOCAL_BACKUP"

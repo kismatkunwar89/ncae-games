@@ -19,7 +19,11 @@ echo "[$(date)] === WWW Hardening START ==="
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
 TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")
-echo "[*] Team number: $TEAM"
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+echo "[*] Team number: $TEAM  LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # -- Password generator (CISA: 14+ chars, upper+lower+digit+special) ----------
 gen_pass() {
@@ -42,12 +46,20 @@ chmod 600 "$CRED_FILE"
 echo "# NCAE WWW Credentials - $(date)" >> "$CRED_FILE"
 
 # -- 1. Update -----------------------------------------------------------------
-echo "[*] Updating packages..."
-apt-get update -y && apt-get upgrade -y --no-new-recommends
+if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+    echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+else
+    echo "[*] Updating packages..."
+    apt-get update -y && apt-get upgrade -y --no-new-recommends
+fi
 
 # -- 2. Install tools ----------------------------------------------------------
-echo "[*] Installing security tools..."
-apt-get install -y ufw fail2ban auditd aide libpam-pwquality curl wget libcap2-bin 2>/dev/null || true
+if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+    echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+else
+    echo "[*] Installing security tools..."
+    apt-get install -y ufw fail2ban auditd aide libpam-pwquality curl wget libcap2-bin 2>/dev/null || true
+fi
 
 # -- 3. User account lockdown + CISA passwords --------------------------------
 echo "[*] Locking down user accounts with CISA-compliant passwords..."
@@ -121,7 +133,7 @@ AllowAgentForwarding no
 ClientAliveInterval 300
 ClientAliveCountMax 2
 Banner /etc/ssh/banner
-AllowUsers *@192.168.${TEAM}.0/24 *@127.0.0.1
+AllowUsers *@${NCAE_LAN} *@127.0.0.1
 EOF
 echo "Authorized access only - NCAE CyberGames 2026" > /etc/ssh/banner
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
@@ -132,12 +144,12 @@ ufw --force reset
 ufw default deny incoming
 ufw default deny outgoing
 # SSH: internal LAN only — shell VM is the WAN SSH endpoint, not www
-ufw allow from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN only"
+ufw allow from "${NCAE_LAN}" to any port 22 comment "SSH internal LAN only"
 # HTTP/HTTPS: open to all — scoring engine hits these from 172.18.0.0/16
 ufw allow 80/tcp    comment "HTTP scoring"
 ufw allow 443/tcp   comment "HTTPS scoring"
-ufw allow out to "192.168.${TEAM}.0/24" comment "Internal LAN outbound"
-ufw allow out to "172.18.0.0/16" comment "Scoring engine + CA server"
+ufw allow out to "${NCAE_LAN}" comment "Internal LAN outbound"
+ufw allow out to "${NCAE_SCORING}" comment "Scoring engine + CA server"
 ufw allow out to any port 53 comment "DNS resolution"
 ufw --force enable
 
@@ -423,9 +435,9 @@ echo "[$(date)] === WWW Hardening COMPLETE ==="
 echo "Credentials saved to: $CRED_FILE"
 echo ""
 echo "SCORING CHECKLIST:"
-echo "  HTTP  (500): curl -I http://192.168.${TEAM}.5"
-echo "  HTTPS (1500): curl -Ik https://192.168.${TEAM}.5"
-echo "  Content(1500): curl -s https://192.168.${TEAM}.5 | grep -i title"
+echo "  HTTP  (500): curl -I http://${NCAE_LAN_BASE}.5"
+echo "  HTTPS (1500): curl -Ik https://${NCAE_LAN_BASE}.5"
+echo "  Content(1500): curl -s https://${NCAE_LAN_BASE}.5 | grep -i title"
 echo ""
 echo "  [!!] ACTION: Replace self-signed cert with CA-signed from 172.18.0.38"
 echo "  CSR at: /etc/ssl/ncae/certs/server.csr"

@@ -27,6 +27,11 @@ if [[ -z "$TEAM" ]] || ! [[ "$TEAM" =~ ^[0-9]+$ ]]; then
     read -rp "    Enter team number manually: " TEAM
 fi
 echo "[*] Team: $TEAM"
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
+NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+echo "[*] LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # -- Password generator (CISA: 14+ chars) -------------------------------------
 gen_pass() {
@@ -62,14 +67,22 @@ SCORING_DB_NAME="scoringdb"
 echo "Postgres scoring password: $NCAE_DB_PASS" >> "$CRED_FILE"
 
 # -- 1. Update -----------------------------------------------------------------
-echo "[*] Updating packages..."
-apt-get update -y && apt-get upgrade -y --no-new-recommends
+if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+    echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+else
+    echo "[*] Updating packages..."
+    apt-get update -y && apt-get upgrade -y --no-new-recommends
+fi
 
 # -- 2. Install packages -------------------------------------------------------
-echo "[*] Installing packages..."
-apt-get install -y ufw fail2ban auditd libpam-pwquality libcap2-bin 2>/dev/null || true
-if ! command -v psql &>/dev/null; then
-    apt-get install -y postgresql postgresql-contrib
+if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+    echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+else
+    echo "[*] Installing packages..."
+    apt-get install -y ufw fail2ban auditd libpam-pwquality libcap2-bin 2>/dev/null || true
+    if ! command -v psql &>/dev/null; then
+        apt-get install -y postgresql postgresql-contrib
+    fi
 fi
 
 PG_VER=$(psql --version 2>/dev/null | grep -oP '\d+' | head -1 || echo "16")
@@ -175,7 +188,7 @@ cat > "${PG_CONF}/pg_hba.conf" <<EOF
 local   all             postgres                                peer
 local   all             all                                     scram-sha-256
 # Scoring engine from internal LAN
-host    ${SCORING_DB_NAME}   ${SCORING_DB_USER}   192.168.${TEAM}.0/24     scram-sha-256
+host    ${SCORING_DB_NAME}   ${SCORING_DB_USER}   ${NCAE_LAN}     scram-sha-256
 host    ${SCORING_DB_NAME}   ${SCORING_DB_USER}   127.0.0.1/32             scram-sha-256
 # Deny all other remote connections - catch-all must come AFTER the scoring rules
 # (pg_hba is evaluated top-to-bottom, first match wins)
@@ -201,7 +214,7 @@ rm -f /root/pg_conf_clean.tmp
 # Append all managed settings exactly once
 cat >> "${PG_CONF}/postgresql.conf" <<PGEOF
 # -- NCAE hardening settings ---------------------------------------
-listen_addresses = '192.168.${TEAM}.7, 127.0.0.1'  # Internal LAN IP + loopback only
+listen_addresses = '${NCAE_LAN_BASE}.7, 127.0.0.1'  # Internal LAN IP + loopback only
 password_encryption = scram-sha-256  # Must match METHOD in pg_hba.conf above
 log_connections = on
 log_disconnections = on
@@ -215,8 +228,8 @@ echo "[+] PostgreSQL restarted"
 echo "[*] Verifying listen_addresses in config..."
 LISTEN_CHECK=$(grep "^listen_addresses" "${PG_CONF}/postgresql.conf" | tail -1)
 echo "    -> $LISTEN_CHECK"
-if [[ "$LISTEN_CHECK" != *"192.168.${TEAM}.7"* ]]; then
-    echo "[!] WARNING: listen_addresses may not include 192.168.${TEAM}.7 - verify manually"
+if [[ "$LISTEN_CHECK" != *"${NCAE_LAN_BASE}.7"* ]]; then
+    echo "[!] WARNING: listen_addresses may not include ${NCAE_LAN_BASE}.7 - verify manually"
 fi
 
 # -- 9. Verify scoring connection ----------------------------------------------
@@ -227,7 +240,7 @@ sleep 2  # Let postgres fully restart
 # appearing in /proc/PID/environ where any local user could read it
 {
   echo "127.0.0.1:5432:${SCORING_DB_NAME}:${SCORING_DB_USER}:${NCAE_DB_PASS}"
-  echo "192.168.${TEAM}.7:5432:${SCORING_DB_NAME}:${SCORING_DB_USER}:${NCAE_DB_PASS}"
+  echo "${NCAE_LAN_BASE}.7:5432:${SCORING_DB_NAME}:${SCORING_DB_USER}:${NCAE_DB_PASS}"
 } > /root/.pgpass
 chmod 600 /root/.pgpass
 psql -h 127.0.0.1 -U "$SCORING_DB_USER" -d "$SCORING_DB_NAME" \
@@ -240,12 +253,12 @@ apt-get install -y ufw 2>/dev/null || true
 ufw --force reset
 ufw default deny incoming
 ufw default deny outgoing
-ufw allow from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN only"
-# Postgres: internal LAN (our VMs) + scoring engine (172.18.0.0/16 queries DB directly for scoring)
-ufw allow from "192.168.${TEAM}.0/24" to any port 5432 comment "Postgres internal LAN"
-ufw allow from "172.18.0.0/16" to any port 5432 comment "Postgres scoring engine"
-ufw allow out to "192.168.${TEAM}.0/24" comment "Internal LAN outbound"
-ufw allow out to "172.18.0.0/16" comment "Scoring engine outbound"
+ufw allow from "${NCAE_LAN}" to any port 22 comment "SSH internal LAN only"
+# Postgres: internal LAN (our VMs) + scoring engine (${NCAE_SCORING} queries DB directly for scoring)
+ufw allow from "${NCAE_LAN}" to any port 5432 comment "Postgres internal LAN"
+ufw allow from "${NCAE_SCORING}" to any port 5432 comment "Postgres scoring engine"
+ufw allow out to "${NCAE_LAN}" comment "Internal LAN outbound"
+ufw allow out to "${NCAE_SCORING}" comment "Scoring engine outbound"
 ufw allow out to any port 53 comment "DNS resolution"
 ufw --force enable
 echo "[*] UFW status:"
@@ -262,7 +275,7 @@ X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
 LoginGraceTime 30
-AllowUsers *@192.168.${TEAM}.0/24 *@172.18.0.0/16 *@127.0.0.1
+AllowUsers *@${NCAE_LAN} *@${NCAE_SCORING} *@127.0.0.1
 EOF
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
@@ -364,12 +377,12 @@ echo "Credentials: $CRED_FILE"
 echo ""
 echo "SCORING CHECKLIST (500pts):"
 echo "  Test from another VM on internal LAN:"
-echo "  # Add to /root/.pgpass: 192.168.${TEAM}.7:5432:${SCORING_DB_NAME}:${SCORING_DB_USER}:<pass>"
-echo "  psql -h 192.168.${TEAM}.7 -U ${SCORING_DB_USER} -d ${SCORING_DB_NAME} -c 'SELECT NOW();'"
+echo "  # Add to /root/.pgpass: ${NCAE_LAN_BASE}.7:5432:${SCORING_DB_NAME}:${SCORING_DB_USER}:<pass>"
+echo "  psql -h ${NCAE_LAN_BASE}.7 -U ${SCORING_DB_USER} -d ${SCORING_DB_NAME} -c 'SELECT NOW();'"
 echo "  (Password is in $CRED_FILE)"
 echo ""
 echo "  Verify listen address:"
 echo "  ss -tlnp | grep 5432"
-echo "  Expected: 192.168.${TEAM}.7:5432"
+echo "  Expected: ${NCAE_LAN_BASE}.7:5432"
 echo ""
 echo "  Config: password_encryption = scram-sha-256  # Must match METHOD in pg_hba.conf above  |  pg_hba method = scram-sha-256  (matched)"

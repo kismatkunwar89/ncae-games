@@ -13,7 +13,7 @@
 #   - Log rules use positional index, not fragile comment-based place-before
 #   - Password changed LAST so import session stays alive
 #   - SCP uses MikroTik root '/'
-#   - Added external LAN (172.18.0.0/16) to SSH allow for jumphost access
+#   - Added external LAN (${NCAE_SCORING}) to SSH allow for jumphost access
 #
 # Usage: bash harden_router.sh <team_number> <router_ip> [router_user]
 # =============================================================================
@@ -33,6 +33,11 @@ if [[ -z "$TEAM" || -z "$ROUTER_IP" ]]; then
     TEAM="X"
     ROUTER_IP="172.18.13.X"
 fi
+
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
+NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 
 gen_pass() {
     local len=${1:-16}; local pass
@@ -60,7 +65,7 @@ echo "[!] Password change is applied LAST - your current session remains live du
 
 cat > /root/ncae_router_commands.rsc <<EOF
 # NCAE CyberGames 2026 - MikroTik RouterOS Hardening
-# Team ${TEAM} | Ext: 172.18.13.${TEAM} | Int: 192.168.${TEAM}.1
+# Team ${TEAM} | Ext: 172.18.13.${TEAM} | Int: ${NCAE_LAN_BASE}.1
 
 # -- Step 1: Disable unused management services --------------------------------
 # telnet/ftp/www/api expose the router to exploitation over HTTP or plaintext protocols
@@ -109,8 +114,8 @@ add chain=input connection-state=established,related action=accept comment="ncae
 add chain=input connection-state=invalid action=drop comment="ncae-input-drop-invalid"
 add chain=input protocol=icmp action=accept comment="ncae-ICMP-SCORING-DO-NOT-REMOVE"
 # ^ DO NOT REMOVE: ICMP is how the scoring engine checks router uptime (500pts)
-add chain=input protocol=tcp dst-port=22 src-address=192.168.${TEAM}.0/24 action=accept comment="ncae-ssh-internal-lan"
-add chain=input protocol=tcp dst-port=22 src-address=172.18.0.0/16 action=accept comment="ncae-ssh-external-lan-jumphost"
+add chain=input protocol=tcp dst-port=22 src-address=${NCAE_LAN} action=accept comment="ncae-ssh-internal-lan"
+add chain=input protocol=tcp dst-port=22 src-address=${NCAE_SCORING} action=accept comment="ncae-ssh-external-lan-jumphost"
 add chain=input action=log log-prefix="DROP-IN: " comment="ncae-log-input"
 add chain=input action=drop comment="ncae-drop-input"
 
@@ -120,9 +125,9 @@ add chain=input action=drop comment="ncae-drop-input"
 /ip firewall filter
 add chain=forward connection-state=established,related action=accept comment="ncae-forward-established"
 add chain=forward connection-state=invalid action=drop comment="ncae-forward-invalid"
-add chain=forward src-address=192.168.${TEAM}.0/24 action=accept comment="ncae-forward-lan-out"
-add chain=forward dst-address=192.168.${TEAM}.0/24 action=accept comment="ncae-forward-scoring-to-lan"
-add chain=forward src-address=172.18.0.0/16 dst-address=192.168.${TEAM}.0/24 action=accept comment="ncae-forward-ext-to-int"
+add chain=forward src-address=${NCAE_LAN} action=accept comment="ncae-forward-lan-out"
+add chain=forward dst-address=${NCAE_LAN} action=accept comment="ncae-forward-scoring-to-lan"
+add chain=forward src-address=${NCAE_SCORING} dst-address=${NCAE_LAN} action=accept comment="ncae-forward-ext-to-int"
 add chain=forward action=log log-prefix="DROP-FWD: " comment="ncae-log-forward"
 add chain=forward action=drop comment="ncae-drop-forward"
 
@@ -138,13 +143,13 @@ add chain=srcnat out-interface=\$wanIface action=masquerade comment="ncae-srcnat
 # Scoring engine hits 172.18.13.t (WAN) -> router rewrites to internal service IP
 # Using $wanIface variable (set in Step 3) instead of hardcoded interface name
 add chain=dstnat in-interface=\$wanIface dst-port=80 protocol=tcp \
-    action=dst-nat to-addresses=192.168.${TEAM}.5 to-ports=80 comment="ncae-www-80"
+    action=dst-nat to-addresses=${NCAE_LAN_BASE}.5 to-ports=80 comment="ncae-www-80"
 add chain=dstnat in-interface=\$wanIface dst-port=443 protocol=tcp \
-    action=dst-nat to-addresses=192.168.${TEAM}.5 to-ports=443 comment="ncae-www-443"
+    action=dst-nat to-addresses=${NCAE_LAN_BASE}.5 to-ports=443 comment="ncae-www-443"
 add chain=dstnat in-interface=\$wanIface dst-port=53 protocol=tcp \
-    action=dst-nat to-addresses=192.168.${TEAM}.12 to-ports=53 comment="ncae-dns-tcp"
+    action=dst-nat to-addresses=${NCAE_LAN_BASE}.12 to-ports=53 comment="ncae-dns-tcp"
 add chain=dstnat in-interface=\$wanIface dst-port=53 protocol=udp \
-    action=dst-nat to-addresses=192.168.${TEAM}.12 to-ports=53 comment="ncae-dns-udp"
+    action=dst-nat to-addresses=${NCAE_LAN_BASE}.12 to-ports=53 comment="ncae-dns-udp"
 
 # -- Step 10: Verify before password change ------------------------------------
 /ip firewall nat print
@@ -184,5 +189,5 @@ echo "  ICMP  (500): ping 172.18.13.${TEAM}"
 echo "  HTTP  (500): curl -I http://172.18.13.${TEAM}"
 echo "  HTTPS(1500): curl -Ik https://172.18.13.${TEAM}"
 echo "  DNS-F (500): dig @172.18.13.${TEAM} www.team${TEAM}.local"
-echo "  DNS-R (500): dig @172.18.13.${TEAM} -x 192.168.${TEAM}.5"
+echo "  DNS-R (500): dig @172.18.13.${TEAM} -x ${NCAE_LAN_BASE}.5"
 echo "  Verify WAN: /ip route print where dst-address=0.0.0.0/0"

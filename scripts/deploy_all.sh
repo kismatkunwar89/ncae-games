@@ -79,9 +79,24 @@ echo "   Role : ${ROLE:-(not found)}"
 echo " Roles available: www | dns | db | shell | backup | router"
 echo " Press ENTER to accept detected value, or type to override."
 echo "================================================================"
-read -rp "  Team number [${TEAM}]: " _IN;  [[ -n "$_IN" ]] && TEAM="$_IN"
-read -rp "  Role        [${ROLE}]: " _IN;  [[ -n "$_IN" ]] && ROLE="$_IN"
-echo "[*] Team=$TEAM  Role=$ROLE"
+if [[ "${NCAE_AUTO_ACCEPT:-0}" == "1" ]]; then
+    echo "[*] NCAE_AUTO_ACCEPT=1 — keeping detected values without prompting"
+else
+    read -rp "  Team number [${TEAM}]: " _IN;  [[ -n "$_IN" ]] && TEAM="$_IN"
+    read -rp "  Role        [${ROLE}]: " _IN;  [[ -n "$_IN" ]] && ROLE="$_IN"
+    _LAN_DEF="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+    _SCR_DEF="${NCAE_SCORING:-172.18.0.0/16}"
+    read -rp "  LAN subnet  [${_LAN_DEF}]: " _IN;  [[ -n "$_IN" ]] && _LAN_DEF="$_IN"
+    read -rp "  Scoring net [${_SCR_DEF}]: " _IN;  [[ -n "$_IN" ]] && _SCR_DEF="$_IN"
+    export NCAE_LAN="$_LAN_DEF"
+    export NCAE_SCORING="$_SCR_DEF"
+fi
+# Defaults when auto-accept or env not set by prompt above
+export NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+export NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+# Derive LAN base prefix (e.g. "192.168.5" from "192.168.5.0/24") for building host IPs
+export NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+echo "[*] Team=$TEAM  Role=$ROLE  LAN=${NCAE_LAN}  Scoring=${NCAE_SCORING}"
 
 # -- Operator detection --------------------------------------------------------
 # SUDO_USER is set by sudo to the original unprivileged user.
@@ -176,7 +191,11 @@ fi
 # has already been attempted before the first backup push happens
 echo ""
 echo "[PHASE 4] Config backup..."
-run_script "backup_configs.sh" "192.168.${TEAM}.15"
+if [[ "${NCAE_SKIP_BACKUP:-0}" == "1" ]]; then
+    echo "[*] Skipping backup push (NCAE_SKIP_BACKUP=1)"
+else
+    run_script "backup_configs.sh" "${NCAE_LAN_BASE}.15"
+fi
 
 # -- Phase 5: Script integrity lock --------------------------------------------
 # chattr +i makes files immutable - even root cannot modify or delete them
@@ -189,15 +208,19 @@ run_script "backup_configs.sh" "192.168.${TEAM}.15"
 # chmod 700 root-owned. Check: lsattr deploy_all.sh
 echo ""
 echo "[PHASE 5] Locking script integrity..."
-if command -v chattr &>/dev/null; then
-    for f in "${SCRIPT_DIR}"/*.sh; do
-        chattr +i "$f" 2>/dev/null && echo "  [+] Immutable: $f" || \
-            echo "  [!] chattr failed on $f (filesystem may not support it - OK on vboxsf)"
-    done
-    echo "[*] To unlock for edits: chattr -i <script>"
+if [[ "${NCAE_SKIP_SCRIPT_LOCK:-0}" == "1" ]]; then
+    echo "[*] Skipping script integrity lock (NCAE_SKIP_SCRIPT_LOCK=1)"
 else
-    echo "[!] chattr not available - applying chmod 444 instead"
-    chmod 444 "${SCRIPT_DIR}"/*.sh
+    if command -v chattr &>/dev/null; then
+        for f in "${SCRIPT_DIR}"/*.sh; do
+            chattr +i "$f" 2>/dev/null && echo "  [+] Immutable: $f" || \
+                echo "  [!] chattr failed on $f (filesystem may not support it - OK on vboxsf)"
+        done
+        echo "[*] To unlock for edits: chattr -i <script>"
+    else
+        echo "[!] chattr not available - applying chmod 444 instead"
+        chmod 444 "${SCRIPT_DIR}"/*.sh
+    fi
 fi
 
 # -- Summary -------------------------------------------------------------------
@@ -215,20 +238,20 @@ echo ""
 echo "[ SCORING CHECKLIST - $ROLE ]"
 case "$ROLE" in
     www)
-        echo "  HTTP   (500): curl -I http://192.168.${TEAM}.5"
-        echo "  SSL   (1500): curl -Ik https://192.168.${TEAM}.5"
-        echo "  CONTENT(1500): curl -sk https://192.168.${TEAM}.5 | grep -i '<title>'"
+        echo "  HTTP   (500): curl -I http://${NCAE_LAN_BASE}.5"
+        echo "  SSL   (1500): curl -Ik https://${NCAE_LAN_BASE}.5"
+        echo "  CONTENT(1500): curl -sk https://${NCAE_LAN_BASE}.5 | grep -i '<title>'"
         echo "  [!!] Replace self-signed cert: /etc/ssl/ncae/certs/server.csr -> CA 172.18.0.38"
         ;;
     dns)
-        echo "  INT FWD (500): dig @192.168.${TEAM}.12 www.team${TEAM}.local"
-        echo "  INT REV (500): dig @192.168.${TEAM}.12 -x 192.168.${TEAM}.5"
+        echo "  INT FWD (500): dig @${NCAE_LAN_BASE}.12 www.team${TEAM}.local"
+        echo "  INT REV (500): dig @${NCAE_LAN_BASE}.12 -x ${NCAE_LAN_BASE}.5"
         echo "  EXT FWD (500): dig @172.18.13.${TEAM} www.team${TEAM}.local"
-        echo "  EXT REV (500): dig @172.18.13.${TEAM} -x 192.168.${TEAM}.5"
-        echo "  [!!] Router port forwards 53 TCP+UDP -> 192.168.${TEAM}.12 required"
+        echo "  EXT REV (500): dig @172.18.13.${TEAM} -x ${NCAE_LAN_BASE}.5"
+        echo "  [!!] Router port forwards 53 TCP+UDP -> ${NCAE_LAN_BASE}.12 required"
         ;;
     db)
-        echo "  Postgres (500): psql -h 192.168.${TEAM}.7 -U scoring -d scoringdb"
+        echo "  Postgres (500): psql -h ${NCAE_LAN_BASE}.7 -U scoring -d scoringdb"
         echo "  (.pgpass set up by harden_db.sh - or: cat /root/ncae_credentials_db.txt)"
         echo "  Verify listen: ss -tlnp | grep 5432"
         ;;

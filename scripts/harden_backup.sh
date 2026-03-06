@@ -25,6 +25,11 @@ if [[ -z "$TEAM" ]]; then
     read -rp "[?] Enter team number: " TEAM
 fi
 echo "[*] Team: $TEAM"
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
+NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+echo "[*] LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # Detect OS - FIXED: no eval, direct if/else
 # NOTE: All package installs happen HERE before firewall lockdown.
@@ -33,17 +38,33 @@ if command -v apt-get &>/dev/null; then
     OS="ubuntu"
     FW="ufw"
     echo "[*] OS: Ubuntu"
-    apt-get update -y || true
-    apt-get upgrade -y --no-new-recommends 2>/dev/null || true
-    apt-get install -y fail2ban rsync auditd openssh-server 2>/dev/null || true
+    if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+        echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+    else
+        apt-get update -y || true
+        apt-get upgrade -y --no-new-recommends 2>/dev/null || true
+    fi
+    if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+        echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+    else
+        apt-get install -y fail2ban rsync auditd openssh-server 2>/dev/null || true
+    fi
 else
     OS="rocky"
     FW="firewalld"
     echo "[*] OS: Rocky Linux"
-    dnf update -y 2>/dev/null || true
-    dnf install -y rsync auditd openssh-server 2>/dev/null || true
-    # fail2ban requires EPEL - optional
-    dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available - skipping"
+    if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+        echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+    else
+        dnf update -y 2>/dev/null || true
+    fi
+    if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+        echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+    else
+        dnf install -y rsync auditd openssh-server 2>/dev/null || true
+        # fail2ban requires EPEL - optional
+        dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available - skipping"
+    fi
 fi
 
 gen_pass() {
@@ -103,7 +124,7 @@ chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 echo "[!] ACTION: When backup_configs.sh runs on other VMs, it will add its key here."
-echo "    To pre-authorize manually: cat /root/.ssh/ncae_backup_ed25519.pub | ssh root@192.168.${TEAM}.15 'cat >> /root/.ssh/authorized_keys'"
+echo "    To pre-authorize manually: cat /root/.ssh/ncae_backup_ed25519.pub | ssh root@${NCAE_LAN_BASE}.15 'cat >> /root/.ssh/authorized_keys'"
 
 # -- 3. SSH hardening ----------------------------------------------------------
 # FIXED: PasswordAuthentication YES - keeps access open until backup keys confirmed
@@ -121,7 +142,7 @@ AllowAgentForwarding no
 LoginGraceTime 30
 ClientAliveInterval 120
 ClientAliveCountMax 2
-AllowUsers root@192.168.${TEAM}.0/24
+AllowUsers root@${NCAE_LAN}
 EOF
 
 # Script to lock down SSH after backup key is working
@@ -151,7 +172,7 @@ else
 fi
 
 # -- 4. Firewall - segment backup VM ------------------------------------------
-# Allow: 192.168.t.0/24 (internal LAN) + 172.18.0.0/16 (scoring engine)
+# Allow: 192.168.t.0/24 (internal LAN) + ${NCAE_SCORING} (scoring engine)
 # Block: everything else
 # The backup VM is NOT publicly accessible - it only needs to talk to our own VMs
 # and the scoring engine. Deny-by-default prevents red team from exfiltrating backups.
@@ -168,11 +189,11 @@ if [[ "$FW" == "ufw" ]]; then
     ufw default deny incoming
     ufw default deny outgoing
     # SSH from internal LAN only - backup VM should never accept SSH from WAN
-    ufw allow in from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN"
+    ufw allow in from "${NCAE_LAN}" to any port 22 comment "SSH internal LAN"
     # Allow rsync/SCP inbound from all internal VMs (backup_configs.sh pushes here)
-    ufw allow in from "192.168.${TEAM}.0/24" comment "internal LAN backup rsync"
+    ufw allow in from "${NCAE_LAN}" comment "internal LAN backup rsync"
     # Outbound: internal LAN + DNS resolution only
-    ufw allow out to "192.168.${TEAM}.0/24" comment "internal LAN outbound"
+    ufw allow out to "${NCAE_LAN}" comment "internal LAN outbound"
     ufw allow out to any port 53 comment "DNS resolution"
     ufw --force enable
     echo "[+] UFW enabled on backup VM"
@@ -184,9 +205,9 @@ elif [[ "$FW" == "firewalld" ]]; then
     firewall-cmd --permanent --new-zone=backup-zone 2>/dev/null || true
     firewall-cmd --permanent --zone=backup-zone --set-target=DROP
     firewall-cmd --permanent --zone=backup-zone \
-        --add-rich-rule="rule family='ipv4' source address='192.168.${TEAM}.0/24' service name='ssh' accept"
+        --add-rich-rule="rule family='ipv4' source address='${NCAE_LAN}' service name='ssh' accept"
     firewall-cmd --permanent --zone=backup-zone \
-        --add-rich-rule="rule family='ipv4' source address='172.18.0.0/16' accept"
+        --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' accept"
     NIC=$(ip route | grep default | awk '{print $5}' | head -1)
     [[ -z "$NIC" ]] && NIC=$(ip link show | grep -v 'lo\|LOOPBACK' | awk -F: 'NR==1{print $2}' | tr -d ' ')
     [[ -z "$NIC" ]] && NIC="eth0"
@@ -304,6 +325,6 @@ echo "  2. Verify rsync works: ls /srv/ncae_backups/"
 echo "  3. Lock SSH: /root/ncae_lock_backup_ssh.sh"
 echo ""
 echo "SEGMENTATION:"
-echo "  Inbound:  192.168.${TEAM}.0/24, 172.18.0.0/16"
-echo "  Outbound: 192.168.${TEAM}.0/24, 172.18.0.0/16, port 53"
+echo "  Inbound:  ${NCAE_LAN}, ${NCAE_SCORING}"
+echo "  Outbound: ${NCAE_LAN}, ${NCAE_SCORING}, port 53"
 echo "  All else: DENIED"

@@ -22,11 +22,15 @@ echo "[$(date)] === DNS Hardening START ==="
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
 TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
+NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 SERIAL=$(date +%s)  # Unix epoch timestamp used as zone serial number
 # Benefits: always a valid 32-bit uint, auto-increments on every run, no manual management
 # BIND requires serial to increase on every zone change for secondaries to pick up updates
 # Max value 4294967295 (2^32-1) - current epoch ~1.77B, safe for 80+ years
-echo "[*] Team: $TEAM  |  Serial: $SERIAL"
+echo "[*] Team: $TEAM  |  Serial: $SERIAL  |  LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # -- Password generator (CISA: 14+ chars) -------------------------------------
 gen_pass() {
@@ -46,13 +50,21 @@ chmod 600 "$CRED_FILE"
 echo "# NCAE DNS Credentials - $(date)" >> "$CRED_FILE"
 
 # -- 1. Update -----------------------------------------------------------------
-echo "[*] Updating packages..."
-dnf update -y
+if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+    echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+else
+    echo "[*] Updating packages..."
+    dnf update -y
+fi
 
 # -- 2. Install packages -------------------------------------------------------
-echo "[*] Installing packages..."
-dnf install -y bind bind-utils policycoreutils-python-utils fail2ban-firewalld libcap 2>/dev/null || \
-dnf install -y bind bind-utils libcap 2>/dev/null || true
+if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+    echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+else
+    echo "[*] Installing packages..."
+    dnf install -y bind bind-utils policycoreutils-python-utils fail2ban-firewalld libcap 2>/dev/null || \
+    dnf install -y bind bind-utils libcap 2>/dev/null || true
+fi
 
 # -- 3. User lockdown + CISA passwords ----------------------------------------
 echo "[*] Locking user accounts..."
@@ -116,7 +128,7 @@ X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
 LoginGraceTime 30
-AllowUsers *@192.168.${TEAM}.0/24 *@172.18.0.0/16 *@127.0.0.1
+AllowUsers *@${NCAE_LAN} *@${NCAE_SCORING} *@127.0.0.1
 EOF
 systemctl restart sshd 2>/dev/null || true
 
@@ -132,9 +144,9 @@ firewall-cmd --permanent --zone=ncae-dns --add-port=53/tcp 2>/dev/null || true
 firewall-cmd --permanent --zone=ncae-dns --add-port=53/udp 2>/dev/null || true
 # SSH from internal LAN + external scoring range only
 firewall-cmd --permanent --zone=ncae-dns \
-    --add-rich-rule="rule family='ipv4' source address='192.168.${TEAM}.0/24' service name='ssh' accept" 2>/dev/null || true
+    --add-rich-rule="rule family='ipv4' source address='${NCAE_LAN}' service name='ssh' accept" 2>/dev/null || true
 firewall-cmd --permanent --zone=ncae-dns \
-    --add-rich-rule="rule family='ipv4' source address='172.18.0.0/16' service name='ssh' accept" 2>/dev/null || true
+    --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' service name='ssh' accept" 2>/dev/null || true
 NIC=$(ip route | grep default | awk '{print $5}' | head -1)
 [[ -z "$NIC" ]] && NIC=$(ip link show | grep -v 'lo\|LOOPBACK' | awk -F: 'NR==1{print $2}' | tr -d ' ')
 [[ -z "$NIC" ]] && NIC="eth0"  # last-resort fallback
@@ -155,7 +167,7 @@ options {
 
     allow-query     { any; };
     /* Recursion for internal LAN only - external clients get REFUSED */
-    allow-recursion { 192.168.${TEAM}.0/24; 127.0.0.1; };
+    allow-recursion { ${NCAE_LAN}; 127.0.0.1; };
     recursion yes;
 
     /* dnssec-validation disabled: we have no DNSSEC keys configured, so enabling
@@ -230,13 +242,13 @@ cat > "/var/named/team${TEAM}.local.fwd" <<EOF
 
             IN  NS  ns1.team${TEAM}.local.
 
-ns1         IN  A   192.168.${TEAM}.12
-router      IN  A   192.168.${TEAM}.1
-www         IN  A   192.168.${TEAM}.5
-db          IN  A   192.168.${TEAM}.7
-dns         IN  A   192.168.${TEAM}.12
+ns1         IN  A   ${NCAE_LAN_BASE}.12
+router      IN  A   ${NCAE_LAN_BASE}.1
+www         IN  A   ${NCAE_LAN_BASE}.5
+db          IN  A   ${NCAE_LAN_BASE}.7
+dns         IN  A   ${NCAE_LAN_BASE}.12
 shell       IN  A   172.18.14.${TEAM}
-backup      IN  A   192.168.${TEAM}.15
+backup      IN  A   ${NCAE_LAN_BASE}.15
 EOF
 
 # -- 9. Reverse zone file ------------------------------------------------------
@@ -372,14 +384,14 @@ echo "[$(date)] === DNS Hardening COMPLETE ==="
 echo "Credentials: $CRED_FILE"
 echo ""
 echo "SCORING CHECKLIST (2000pts):"
-echo "  INT FWD (500): dig @192.168.${TEAM}.12 www.team${TEAM}.local"
-echo "  INT REV (500): dig @192.168.${TEAM}.12 -x 192.168.${TEAM}.5"
+echo "  INT FWD (500): dig @${NCAE_LAN_BASE}.12 www.team${TEAM}.local"
+echo "  INT REV (500): dig @${NCAE_LAN_BASE}.12 -x ${NCAE_LAN_BASE}.5"
 echo "  EXT FWD (500): dig @172.18.13.${TEAM} www.team${TEAM}.local"
-echo "  EXT REV (500): dig @172.18.13.${TEAM} -x 192.168.${TEAM}.5"
+echo "  EXT REV (500): dig @172.18.13.${TEAM} -x ${NCAE_LAN_BASE}.5"
 echo ""
 echo "  ROUTER PORT FORWARDS REQUIRED FOR EXT SCORING:"
-echo "  /ip firewall nat add chain=dstnat in-interface=ether1 dst-port=53 protocol=tcp action=dst-nat to-addresses=192.168.${TEAM}.12 to-ports=53"
-echo "  /ip firewall nat add chain=dstnat in-interface=ether1 dst-port=53 protocol=udp action=dst-nat to-addresses=192.168.${TEAM}.12 to-ports=53"
+echo "  /ip firewall nat add chain=dstnat in-interface=ether1 dst-port=53 protocol=tcp action=dst-nat to-addresses=${NCAE_LAN_BASE}.12 to-ports=53"
+echo "  /ip firewall nat add chain=dstnat in-interface=ether1 dst-port=53 protocol=udp action=dst-nat to-addresses=${NCAE_LAN_BASE}.12 to-ports=53"
 echo ""
 echo "  VERIFY: systemctl status named | grep -i running"
 echo "  RELOAD ZONE (after edits): rndc reload"

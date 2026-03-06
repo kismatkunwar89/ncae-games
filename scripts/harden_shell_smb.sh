@@ -25,7 +25,11 @@ echo "[$(date)] === Shell/SMB Hardening START ==="
 
 TEAM=$(ip addr show | grep -oP '172\.18\.14\.\K[0-9]+' | head -1 2>/dev/null || \
        ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")
-echo "[*] Team: $TEAM"
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+echo "[*] Team: $TEAM  LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # -- Password generator (CISA: 14+ chars, 4 complexity classes) ---------------
 gen_pass() {
@@ -173,7 +177,7 @@ AllowAgentForwarding no
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
-AllowUsers scoring@172.18.0.0/16 root@192.168.${TEAM}.0/24 *@127.0.0.1
+AllowUsers scoring@${NCAE_SCORING} root@${NCAE_LAN} *@127.0.0.1
 # scoring: only from external LAN 172.18.0.0/16 (scoring engine + jumphost)
 # root: only from internal LAN 192.168.t.0/24 (jump from another of our VMs)
 EOF
@@ -299,7 +303,7 @@ semanage fcontext -a -t samba_share_t "${SMB_READ_DIR}(/.*)?" 2>/dev/null || tru
 restorecon -Rv "$SMB_WRITE_DIR" "$SMB_READ_DIR" 2>/dev/null || true
 
 # -- 11. Firewall --------------------------------------------------------------
-echo "[*] Configuring firewalld (restricted - SSH + SMB from 172.18.0.0/16 only)..."
+echo "[*] Configuring firewalld (restricted - SSH + SMB from ${NCAE_SCORING} only)..."
 systemctl enable firewalld 2>/dev/null || true
 systemctl start firewalld 2>/dev/null || true
 firewall-cmd --permanent --set-default-zone=drop 2>/dev/null || true
@@ -307,12 +311,12 @@ firewall-cmd --permanent --new-zone=ncae-shell 2>/dev/null || true
 firewall-cmd --permanent --zone=ncae-shell --set-target=DROP 2>/dev/null || true
 # SSH from external LAN (scoring + jumphost) and internal LAN
 firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='172.18.0.0/16' service name='ssh' accept" 2>/dev/null || true
+    --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' service name='ssh' accept" 2>/dev/null || true
 firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='192.168.${TEAM}.0/24' service name='ssh' accept" 2>/dev/null || true
+    --add-rich-rule="rule family='ipv4' source address='${NCAE_LAN}' service name='ssh' accept" 2>/dev/null || true
 # SMB from external LAN (scoring)
 firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='172.18.0.0/16' service name='samba' accept" 2>/dev/null || true
+    --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' service name='samba' accept" 2>/dev/null || true
 NIC=$(ip route | grep default | awk '{print $5}' | head -1)
 [[ -z "$NIC" ]] && NIC=$(ip link show | grep -v 'lo\|LOOPBACK' | awk -F: 'NR==1{print $2}' | tr -d ' ')
 [[ -z "$NIC" ]] && NIC="eth0"

@@ -7,6 +7,9 @@
 # =============================================================================
 TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || \
        ip addr show | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "?")
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YEL='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}[✔] $1${NC}"; }
@@ -49,7 +52,7 @@ else
 fi
 
 # -- DNS INT FWD (500pts) ------------------------------------------------------
-DNS_IP="192.168.${TEAM}.12"
+DNS_IP="${NCAE_LAN_BASE}.12"
 if dig @"${DNS_IP}" "www.team${TEAM}.local" +short +time=3 2>/dev/null | grep -qE '^[0-9]'; then
     ok "DNS INT FWD: www.team${TEAM}.local resolves via ${DNS_IP} (500pts)"
 else
@@ -57,7 +60,7 @@ else
 fi
 
 # -- DNS INT REV (500pts) ------------------------------------------------------
-WWW_IP="192.168.${TEAM}.5"
+WWW_IP="${NCAE_LAN_BASE}.5"
 if dig @"${DNS_IP}" -x "${WWW_IP}" +short +time=3 2>/dev/null | grep -q "team${TEAM}"; then
     ok "DNS INT REV: ${WWW_IP} reverse resolves (500pts)"
 else
@@ -66,7 +69,7 @@ fi
 
 # -- PostgreSQL (500pts) -------------------------------------------------------
 if command -v pg_isready &>/dev/null; then
-    DB_IP="192.168.${TEAM}.7"
+    DB_IP="${NCAE_LAN_BASE}.7"
     if pg_isready -h "${DB_IP}" -t 5 2>/dev/null | grep -q "accepting"; then
         ok "PostgreSQL accepting connections on ${DB_IP}:5432 (500pts)"
     else
