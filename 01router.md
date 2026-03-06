@@ -7,11 +7,33 @@
 
 ---
 
-## Run First
+## PHASE 1 — CHECK
+```bash
+# MikroTik — check for red team backdoor rules before hardening
+/ip firewall filter print
+/ip firewall nat print
+/user print
+/system scheduler print   # check for malicious scheduled scripts
+```
+
+## PHASE 2 — HARDEN
 ```bash
 # From any internal VM — push hardening script to router
 sudo bash /opt/ncae/harden_router.sh <team_number> 172.18.13.t
 sudo cat /root/ncae_credentials_router.txt
+```
+
+## PHASE 3 — MONITOR
+```bash
+# MikroTik live traffic and firewall logs
+/tool torch interface=ether0          # watch WAN traffic live
+/log print follow where topics~"firewall"
+/ip firewall filter set [find action=drop] log=yes log-prefix="DROP:"
+```
+
+## PHASE 4 — RESPOND
+```bash
+sudo bash /opt/ncae/incident_response.sh   # run from an internal VM
 ```
 
 ---
