@@ -467,6 +467,149 @@ echo "$PATH" | tr ':' '\n' | while read -r dir; do
     fi
 done
 
+# ── 17. SYSTEMD TIMERS & GENERATORS ──────────────────────────────────────────
+head "SYSTEMD TIMERS & GENERATORS (T1053.006 / T1543.002)"
+
+echo "[*] All .timer units — look for unexpected entries:"
+find /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system \
+     -name '*.timer' 2>/dev/null | while read -r f; do
+    # Exclude well-known system timers from WARN output — only flag user-dropped ones
+    if echo "$f" | grep -qvE '/(apt|dpkg|fwupd|logrotate|man-db|shadow|e2scrub|phpsessclean|motd|sysstat|unattended|systemd-tmpfiles|systemd-readahead)'; then
+        warn "Timer: $f"
+        grep -E 'OnActiveSec|OnBootSec|OnCalendar|Unit=' "$f" 2>/dev/null | sed 's/^/    /'
+    fi
+done
+
+echo "[*] User-level timers (lingering persistence):"
+find /home /root -path '*/.config/systemd/user/*.timer' 2>/dev/null | while read -r f; do
+    flag "User timer: $f"
+    cat "$f" | sed 's/^/  /'
+done
+
+echo "[*] Systemd generator paths (T1543.002 — run before normal units):"
+for gendir in /etc/systemd/system-generators /usr/lib/systemd/system-generators \
+              /run/systemd/generator /run/systemd/generator.early /run/systemd/generator.late; do
+    if [[ -d "$gendir" ]]; then
+        find "$gendir" -type f 2>/dev/null | while read -r f; do
+            if echo "$gendir" | grep -q '/run/systemd/generator'; then
+                flag "Runtime generator (in-memory — disappears on reboot unless seeded): $f"
+            else
+                warn "Generator binary: $f"
+            fi
+        done
+    fi
+done
+
+# ── 18. UDEV RULES ────────────────────────────────────────────────────────────
+head "UDEV RULES (T1546.017)"
+
+echo "[*] Scanning udev rules for RUN+= (arbitrary command execution on device event):"
+for rulesdir in /etc/udev/rules.d /run/udev/rules.d /usr/lib/udev/rules.d; do
+    [[ ! -d "$rulesdir" ]] && continue
+    find "$rulesdir" -name '*.rules' -type f 2>/dev/null | while read -r f; do
+        if grep -qiE 'RUN\+=' "$f" 2>/dev/null; then
+            flag "Udev rule with RUN+=: $f"
+            grep -niE 'RUN\+=' "$f" | sed 's/^/  /'
+        fi
+    done
+done
+
+echo "[*] Custom rules in /etc/udev/rules.d (not from packages):"
+find /etc/udev/rules.d -name '*.rules' -type f -newer /etc/hostname 2>/dev/null | while read -r f; do
+    flag "Recently modified udev rule: $f"
+done
+
+# ── 19. DYNAMIC LINKER EXTENDED (T1574.006) ───────────────────────────────────
+head "DYNAMIC LINKER (T1574.006)"
+
+echo "[*] /etc/ld.so.conf and ld.so.conf.d entries:"
+cat /etc/ld.so.conf 2>/dev/null | grep -v '^#\|^$' | while read -r line; do
+    warn "ld.so.conf entry: $line"
+done
+find /etc/ld.so.conf.d -name '*.conf' -type f 2>/dev/null | while read -r f; do
+    grep -v '^#\|^$' "$f" 2>/dev/null | while read -r path; do
+        warn "ld.so.conf.d ($f): $path"
+    done
+done
+
+echo "[*] .so files in world-writable or non-standard library paths:"
+# Check for .so files outside standard system lib dirs — may indicate planted library
+find /tmp /var/tmp /dev/shm /home /opt /srv -name '*.so' -o -name '*.so.*' 2>/dev/null | while read -r f; do
+    flag ".so file in unusual path: $f"
+done
+
+echo "[*] Recently modified .so files in system lib dirs (possible library replacement):"
+find /lib /usr/lib /lib64 /usr/lib64 -name '*.so' -newer /etc/hostname -type f 2>/dev/null | while read -r f; do
+    flag "Recently modified shared library: $f  ($(stat -c 'mtime: %y' "$f"))"
+done
+
+# ── 20. AUDITD INTEGRITY (T1562.012) ──────────────────────────────────────────
+head "AUDITD INTEGRITY (T1562.012)"
+
+echo "[*] Auditd service state:"
+if systemctl is-active --quiet auditd 2>/dev/null; then
+    ok "auditd is running"
+else
+    flag "AUDITD IS STOPPED — audit logging is blind"
+fi
+
+echo "[*] Current audit rules (look for -D flush or missing key rules):"
+if command -v auditctl &>/dev/null; then
+    rules=$(auditctl -l 2>/dev/null)
+    if echo "$rules" | grep -q '\-D'; then
+        flag "Audit rules have been flushed (-D present) — all watches removed"
+    fi
+    echo "$rules" | head -30 | sed 's/^/  /'
+else
+    warn "auditctl not available"
+fi
+
+echo "[*] /etc/audit/rules.d/ files:"
+find /etc/audit/rules.d -type f 2>/dev/null | while read -r f; do
+    warn "$f  ($(stat -c 'mtime: %y' "$f"))"
+done
+
+echo "[*] HISTFILE / shell history tampering indicators:"
+# Attackers set HISTFILE=/dev/null or HISTCONTROL=ignorespace to avoid logging
+for home in /root /home/*; do
+    for rc in "$home/.bashrc" "$home/.bash_profile" "$home/.profile"; do
+        [[ ! -f "$rc" ]] && continue
+        if grep -qE 'HISTFILE\s*=\s*/dev/null|HISTCONTROL.*ignorespace|HISTSIZE\s*=\s*0|unset\s+HISTFILE' "$rc" 2>/dev/null; then
+            flag "History suppression in $rc"
+            grep -nE 'HISTFILE|HISTCONTROL|HISTSIZE|unset HIST' "$rc" | sed 's/^/  /'
+        fi
+    done
+done
+
+# ── 21. KERNEL MODULE LOAD CONFIG (T1547.006) ────────────────────────────────
+head "KERNEL MODULE LOAD CONFIG (T1547.006)"
+
+echo "[*] /etc/modules-load.d/ entries (loaded at boot):"
+find /etc/modules-load.d -name '*.conf' -type f 2>/dev/null | while read -r f; do
+    content=$(grep -v '^#\|^$' "$f" 2>/dev/null || true)
+    if [[ -n "$content" ]]; then
+        warn "$f: $content"
+    fi
+done
+
+echo "[*] /etc/modprobe.d/ entries (look for 'install' overrides — run commands on modprobe):"
+find /etc/modprobe.d -name '*.conf' -type f 2>/dev/null | while read -r f; do
+    if grep -qiE '^\s*install\s' "$f" 2>/dev/null; then
+        warn "modprobe install override in $f:"
+        grep -niE '^\s*install\s' "$f" | sed 's/^/  /'
+        # Flag if the install target is a script in a non-standard path
+        grep -oE 'install\s+\S+\s+\S+' "$f" 2>/dev/null | while read -r _ _ target; do
+            echo "$target" | grep -qvE '^(/sbin|/bin|/usr/sbin|/usr/bin)' && \
+                flag "modprobe install runs non-standard binary: $target"
+        done
+    fi
+done
+
+echo "[*] Recently modified modprobe.d files:"
+find /etc/modprobe.d /etc/modules-load.d -newer /etc/hostname -type f 2>/dev/null | while read -r f; do
+    flag "Recently modified module config: $f"
+done
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 echo ""
 echo "======================================================"

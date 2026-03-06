@@ -273,6 +273,47 @@ cat > /etc/audit/rules.d/ncae_db.rules <<AUDITEOF
 -w /etc/ssh/sshd_config.d -p wa -k ssh_config_changes
 AUDITEOF
 augenrules --load 2>/dev/null || auditctl -R /etc/audit/rules.d/ncae_db.rules 2>/dev/null || true
+# MITRE extended rules
+cat > /etc/audit/rules.d/ncae_mitre_extended.rules <<'AUDITEOF'
+# T1098.007 / T1136.001 — account & group drift
+-w /etc/group -p wa -k group_changes
+-w /etc/gshadow -p wa -k group_changes
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/useradd -k account_mod
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/usermod -k account_mod
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/userdel -k account_mod
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/groupmod -k account_mod
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/gpasswd -k account_mod
+# T1053.006 / T1543.002 — systemd timer & generator persistence
+-w /etc/systemd/system -p wa -k systemd_persistence
+-a always,exit -F arch=b64 -S execve -F path=/bin/systemctl -k systemd_exec
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/systemctl -k systemd_exec
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/systemd-run -k systemd_run
+# T1547.006 / T1014 — kernel module loading
+-a always,exit -F arch=b64 -S init_module,finit_module -k module_load
+-a always,exit -F arch=b64 -S delete_module -k module_unload
+-a always,exit -F arch=b64 -S execve -F path=/sbin/modprobe -k module_load
+-a always,exit -F arch=b64 -S execve -F path=/sbin/insmod -k module_load
+-a always,exit -F arch=b64 -S execve -F path=/sbin/rmmod -k module_unload
+-w /etc/modprobe.d -p wa -k module_config
+-w /etc/modules-load.d -p wa -k module_config
+# T1562.012 — audit system tamper
+-w /etc/audit -p wa -k audit_tamper
+-a always,exit -F arch=b64 -S execve -F path=/sbin/auditctl -k audit_tamper
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/auditctl -k audit_tamper
+# T1546.004 — shell profile persistence
+-w /etc/profile -p wa -k shell_profile
+-w /etc/bash.bashrc -p wa -k shell_profile
+-w /etc/profile.d -p wa -k shell_profile
+# T1546.017 — udev rules
+-w /etc/udev/rules.d -p wa -k udev_rules
+# T1574.006 — dynamic linker config
+-w /etc/ld.so.conf -p wa -k linker_config
+-w /etc/ld.so.conf.d -p wa -k linker_config
+-w /etc/ld.so.preload -p wa -k linker_preload
+AUDITEOF
+augenrules --load 2>/dev/null || auditctl -R /etc/audit/rules.d/ncae_mitre_extended.rules 2>/dev/null || true
 
 # -- 14. PAM password policy (CISA 14+ chars) ---------------------------------
 if [[ -f /etc/security/pwquality.conf ]]; then

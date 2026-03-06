@@ -143,6 +143,53 @@ snapshot_baseline() {
       [[ -f /etc/ssh/sshrc ]] && cat /etc/ssh/sshrc; } | \
         sha256sum > "${BASELINE_DIR}/ssh_hooks_base.txt" 2>/dev/null || true
 
+    # Systemd timer baseline — T1053.006
+    {   find /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system \
+            -name '*.timer' 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        find /home /root -path '*/.config/systemd/user/*.timer' 2>/dev/null | \
+            sort | xargs sha256sum 2>/dev/null
+    } > "${BASELINE_DIR}/timers_base.txt" 2>/dev/null || echo "ABSENT" > "${BASELINE_DIR}/timers_base.txt"
+
+    # Systemd generator baseline — T1543.002
+    find /etc/systemd/system-generators /usr/lib/systemd/system-generators \
+         /run/systemd/generator /run/systemd/generator.early /run/systemd/generator.late \
+         -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null \
+    > "${BASELINE_DIR}/generators_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/generators_base.txt"
+
+    # Group file baseline — T1098.007
+    { sha256sum /etc/group 2>/dev/null; sha256sum /etc/gshadow 2>/dev/null; } \
+        > "${BASELINE_DIR}/groups_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/groups_base.txt"
+
+    # Shell RC file baseline — T1546.004
+    {   sha256sum /etc/profile /etc/bash.bashrc 2>/dev/null
+        find /etc/profile.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        while IFS=: read -r _ _ uid _ _ home _; do
+            [[ $uid -lt 500 && $uid -ne 0 ]] && continue
+            for rc in "$home/.bashrc" "$home/.profile" "$home/.bash_profile" "$home/.zshrc"; do
+                [[ -f "$rc" ]] && sha256sum "$rc" 2>/dev/null
+            done
+        done < /etc/passwd
+    } | sort > "${BASELINE_DIR}/shellrc_base.txt"
+
+    # Udev rules baseline — T1546.017
+    find /etc/udev/rules.d /usr/lib/udev/rules.d /run/udev/rules.d \
+         -name '*.rules' -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null \
+    > "${BASELINE_DIR}/udev_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/udev_base.txt"
+
+    # Dynamic linker config baseline — T1574.006
+    {   sha256sum /etc/ld.so.conf 2>/dev/null
+        find /etc/ld.so.conf.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+    } > "${BASELINE_DIR}/ldconf_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/ldconf_base.txt"
+
+    # Auditd rules baseline — T1562.012
+    {   find /etc/audit/rules.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        auditctl -l 2>/dev/null | sha256sum
+    } > "${BASELINE_DIR}/auditd_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/auditd_base.txt"
+
+    # Kernel module load config baseline — T1547.006
+    find /etc/modules-load.d /etc/modprobe.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null \
+    > "${BASELINE_DIR}/modconf_base.txt" || echo "ABSENT" > "${BASELINE_DIR}/modconf_base.txt"
+
     echo "[+] Baselines ready"
 }
 
@@ -414,6 +461,172 @@ check_ssh_hooks() {
     fi
 }
 
+# -- Check: Systemd timers and generators --------------------------------------
+# T1053.006: attackers create .timer units to schedule persistent tasks
+# T1543.002: generators in /run/systemd/generator* run before normal units
+check_timers() {
+    local cur
+    cur=$(
+        find /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system \
+            -name '*.timer' 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        find /home /root -path '*/.config/systemd/user/*.timer' 2>/dev/null | \
+            sort | xargs sha256sum 2>/dev/null
+    )
+    [[ -z "$cur" ]] && cur="ABSENT"
+    local base
+    base=$(cat "${BASELINE_DIR}/timers_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$cur" != "$base" ]]; then
+        alert "SYSTEMD TIMER CHANGED (T1053.006) — run: systemctl list-timers --all"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' | head -10 || true
+        echo "$cur" > "${BASELINE_DIR}/timers_base.txt"
+    fi
+    local gen_cur gen_base
+    gen_cur=$(find /etc/systemd/system-generators /usr/lib/systemd/system-generators \
+                   /run/systemd/generator /run/systemd/generator.early /run/systemd/generator.late \
+                   -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null || echo "ABSENT")
+    gen_base=$(cat "${BASELINE_DIR}/generators_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$gen_cur" != "$gen_base" ]]; then
+        alert "SYSTEMD GENERATOR CHANGED (T1543.002) — run: ls /run/systemd/generator*"
+        diff <(echo "$gen_base") <(echo "$gen_cur") | grep '^[<>]' | head -10 || true
+        echo "$gen_cur" > "${BASELINE_DIR}/generators_base.txt"
+    fi
+}
+
+# -- Check: Group file drift ---------------------------------------------------
+# T1098.007 / T1136.001: group file changes = new accounts or privilege grants
+check_groups() {
+    local cur
+    cur=$(sha256sum /etc/group 2>/dev/null; sha256sum /etc/gshadow 2>/dev/null)
+    [[ -z "$cur" ]] && return
+    local base
+    base=$(cat "${BASELINE_DIR}/groups_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "GROUP FILE CHANGED (T1098.007) — check /etc/group and /etc/gshadow"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' || true
+        echo "  Privileged group members:"
+        getent group sudo wheel docker disk shadow adm 2>/dev/null | sed 's/^/  /'
+        echo "$cur" > "${BASELINE_DIR}/groups_base.txt"
+    fi
+}
+
+# -- Check: Shell RC file tampering --------------------------------------------
+# T1546.004: .bashrc / /etc/profile.d used for persistent code exec on login
+check_shellrc() {
+    local cur
+    cur=$(
+        sha256sum /etc/profile /etc/bash.bashrc 2>/dev/null
+        find /etc/profile.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        while IFS=: read -r _ _ uid _ _ home _; do
+            [[ $uid -lt 500 && $uid -ne 0 ]] && continue
+            for rc in "$home/.bashrc" "$home/.profile" "$home/.bash_profile" "$home/.zshrc"; do
+                [[ -f "$rc" ]] && sha256sum "$rc" 2>/dev/null
+            done
+        done < /etc/passwd
+    )
+    cur=$(echo "$cur" | sort)
+    local base
+    base=$(cat "${BASELINE_DIR}/shellrc_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "SHELL RC FILE CHANGED (T1546.004) — login persistence likely"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' | head -10 || true
+        echo "$cur" > "${BASELINE_DIR}/shellrc_base.txt"
+    fi
+}
+
+# -- Check: Udev rules tampering -----------------------------------------------
+# T1546.017: udev RUN+= entries execute arbitrary commands on device events
+check_udev() {
+    local cur
+    cur=$(find /etc/udev/rules.d /usr/lib/udev/rules.d /run/udev/rules.d \
+               -name '*.rules' -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null || echo "ABSENT")
+    local base
+    base=$(cat "${BASELINE_DIR}/udev_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$cur" != "$base" ]]; then
+        alert "UDEV RULES CHANGED (T1546.017) — check for RUN+= entries"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' | head -10 || true
+        grep -rn 'RUN+=' /etc/udev/rules.d/ /run/udev/rules.d/ 2>/dev/null | head -5 | sed 's/^/  [!] /'
+        echo "$cur" > "${BASELINE_DIR}/udev_base.txt"
+    fi
+}
+
+# -- Check: Dynamic linker config ----------------------------------------------
+# T1574.006: ld.so.conf changes redirect which .so files processes load
+check_linker() {
+    local cur
+    cur=$(
+        sha256sum /etc/ld.so.conf 2>/dev/null
+        find /etc/ld.so.conf.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+    )
+    [[ -z "$cur" ]] && return
+    local base
+    base=$(cat "${BASELINE_DIR}/ldconf_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "LD.SO.CONF CHANGED (T1574.006) — dynamic linker hijack possible"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' || true
+        echo "$cur" > "${BASELINE_DIR}/ldconf_base.txt"
+    fi
+}
+
+# -- Check: Auditd integrity ---------------------------------------------------
+# T1562.012: attackers stop auditd or flush rules to blind defenders
+check_auditd() {
+    if ! systemctl is-active --quiet auditd 2>/dev/null; then
+        alert "AUDITD STOPPED (T1562.012) — restarting..."
+        systemctl start auditd 2>/dev/null || true
+    fi
+    local cur
+    cur=$(
+        find /etc/audit/rules.d -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null
+        auditctl -l 2>/dev/null | sha256sum
+    )
+    [[ -z "$cur" ]] && return
+    local base
+    base=$(cat "${BASELINE_DIR}/auditd_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "AUDITD RULES CHANGED (T1562.012) — run: auditctl -l"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' || true
+        echo "$cur" > "${BASELINE_DIR}/auditd_base.txt"
+    fi
+}
+
+# -- Check: Kernel module load config ------------------------------------------
+# T1547.006: attackers add entries to modules-load.d to persist kernel modules
+check_modules() {
+    local cur
+    cur=$(find /etc/modules-load.d /etc/modprobe.d -type f 2>/dev/null | \
+          sort | xargs sha256sum 2>/dev/null || echo "ABSENT")
+    local base
+    base=$(cat "${BASELINE_DIR}/modconf_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$cur" != "$base" ]]; then
+        alert "KERNEL MODULE CONFIG CHANGED (T1547.006) — check /etc/modules-load.d/ /etc/modprobe.d/"
+        diff <(echo "$base") <(echo "$cur") | grep '^[<>]' || true
+        echo "$cur" > "${BASELINE_DIR}/modconf_base.txt"
+    fi
+}
+
+# -- Check: Web server child process behavioral (T1505.003) --------------------
+# Web shells show as web worker spawning a shell/interpreter child
+check_webproc() {
+    [[ ! -d /var/www ]] && return
+    for webproc in apache2 nginx php-fpm php8.3 php8.2 php8.1 php7.4; do
+        local pids
+        pids=$(pgrep -x "$webproc" 2>/dev/null || true)
+        [[ -z "$pids" ]] && continue
+        for pid in $pids; do
+            local children
+            children=$(pgrep -P "$pid" 2>/dev/null || true)
+            for child in $children; do
+                local cmd
+                cmd=$(cat /proc/$child/comm 2>/dev/null || true)
+                if echo "$cmd" | grep -qE '^(bash|sh|dash|zsh|python[0-9.]?|perl|ruby|nc|ncat|socat|curl|wget)$'; then
+                    alert "WEB PROCESS SPAWNED SHELL (T1505.003): $webproc($$pid)->$cmd($child)"
+                    cat /proc/$child/cmdline 2>/dev/null | tr '\0' ' ' | sed 's/^/  cmd: /'
+                fi
+            done
+        done
+    done
+}
+
 # -- Check 9: New SUID binaries ------------------------------------------------
 # Throttled: SUID scan runs every 120 loops = 10 minutes at 5s SERVICE_CHECK_INTERVAL
 # A full filesystem find is disk I/O intensive - don't run it every cycle
@@ -547,6 +760,14 @@ while true; do
         check_ldpreload
         check_firewall
         check_ssh_hooks
+        check_timers
+        check_groups
+        check_shellrc
+        check_udev
+        check_linker
+        check_auditd
+        check_modules
+        check_webproc
         check_suid        # throttled internally to every 10 min
         check_disk
         status_snapshot
