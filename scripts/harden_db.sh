@@ -83,6 +83,7 @@ systemctl start postgresql 2>/dev/null || true
 echo "[*] Locking user accounts..."
 KEEP_USERS=("root" "postgres" "scoring" "ubuntu" "daemon" "nobody")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
+[[ -n "${NCAE_OPERATOR:-}" ]] && KEEP_USERS+=("$NCAE_OPERATOR") && echo "[*] Preserving operator: $NCAE_OPERATOR"
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)
     if [[ $uid -ge 1000 ]] && [[ ! " ${KEEP_USERS[*]} " == *" $user "* ]]; then

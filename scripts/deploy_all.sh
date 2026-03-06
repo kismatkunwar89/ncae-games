@@ -83,6 +83,21 @@ read -rp "  Team number [${TEAM}]: " _IN;  [[ -n "$_IN" ]] && TEAM="$_IN"
 read -rp "  Role        [${ROLE}]: " _IN;  [[ -n "$_IN" ]] && ROLE="$_IN"
 echo "[*] Team=$TEAM  Role=$ROLE"
 
+# -- Operator detection --------------------------------------------------------
+# SUDO_USER is set by sudo to the original unprivileged user.
+# This is the person actually sitting at the keyboard — we must never lock them out.
+# We export NCAE_OPERATOR so every harden script called from here inherits it.
+NCAE_OPERATOR="${SUDO_USER:-}"
+# If run directly as root (no sudo), fall back to logname
+[[ -z "$NCAE_OPERATOR" || "$NCAE_OPERATOR" == "root" ]] && \
+    NCAE_OPERATOR="$(logname 2>/dev/null || echo "")"
+if [[ -n "$NCAE_OPERATOR" && "$NCAE_OPERATOR" != "root" ]]; then
+    echo "[*] Operator: $NCAE_OPERATOR — will be preserved in KEEP_USERS"
+    export NCAE_OPERATOR
+else
+    echo "[*] Operator: running as root directly (no sudo user detected)"
+fi
+
 # Wrapper that checks the script exists, makes it executable, runs it, and
 # reports success/failure with the exit code
 run_script() {

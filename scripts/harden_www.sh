@@ -54,6 +54,8 @@ echo "[*] Locking down user accounts with CISA-compliant passwords..."
 KEEP_USERS=("root" "ubuntu" "www-data" "scoring" "daemon" "nobody")
 # Add vagrant to whitelist only when running in a local Vagrant lab
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
+# Preserve whoever ran this script — never lock out the operator
+[[ -n "${NCAE_OPERATOR:-}" ]] && KEEP_USERS+=("$NCAE_OPERATOR") && echo "[*] Preserving operator: $NCAE_OPERATOR"
 
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)

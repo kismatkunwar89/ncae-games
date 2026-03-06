@@ -56,8 +56,9 @@ dnf install -y bind bind-utils libcap 2>/dev/null || true
 
 # -- 3. User lockdown + CISA passwords ----------------------------------------
 echo "[*] Locking user accounts..."
-KEEP_USERS=("root" "named" "scoring" "nobody" "daemon")
+KEEP_USERS=("root" "rocky" "named" "scoring" "nobody" "daemon")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
+[[ -n "${NCAE_OPERATOR:-}" ]] && KEEP_USERS+=("$NCAE_OPERATOR") && echo "[*] Preserving operator: $NCAE_OPERATOR"
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)
     if [[ $uid -ge 1000 ]] && [[ ! " ${KEEP_USERS[*]} " == *" $user "* ]]; then

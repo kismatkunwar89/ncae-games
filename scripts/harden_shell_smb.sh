@@ -62,21 +62,30 @@ fi
 echo "SCORING SMB/SSH password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
 
 # -- 1. Update -----------------------------------------------------------------
-echo "[*] Updating packages..."
-dnf update -y
+if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
+    echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
+else
+    echo "[*] Updating packages..."
+    dnf update -y
+fi
 
 # -- 2. Install packages -------------------------------------------------------
-echo "[*] Installing packages..."
-# Core packages - must succeed
-dnf install -y samba samba-client samba-common libcap \
-    policycoreutils-python-utils quota
-# fail2ban requires EPEL - optional, skip silently if unavailable
-dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available (EPEL not enabled) - skipping"
+if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
+    echo "[*] Skipping package install (NCAE_SKIP_INSTALL=1)"
+else
+    echo "[*] Installing packages..."
+    # Core packages - must succeed
+    dnf install -y samba samba-client samba-common libcap \
+        policycoreutils-python-utils quota
+    # fail2ban requires EPEL - optional, skip silently if unavailable
+    dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available (EPEL not enabled) - skipping"
+fi
 
 # -- 3. User lockdown + CISA passwords ----------------------------------------
 echo "[*] Locking user accounts with CISA-compliant passwords..."
-KEEP_USERS=("root" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
+KEEP_USERS=("root" "rocky" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
+[[ -n "${NCAE_OPERATOR:-}" ]] && KEEP_USERS+=("$NCAE_OPERATOR") && echo "[*] Preserving operator: $NCAE_OPERATOR"
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)
     if [[ $uid -ge 1000 ]] && [[ ! " ${KEEP_USERS[*]} " == *" $user "* ]]; then
