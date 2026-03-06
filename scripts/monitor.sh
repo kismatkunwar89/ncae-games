@@ -115,13 +115,33 @@ snapshot_baseline() {
     # Firewall rule order baseline (hash the full ordered ruleset)
     # iptables -I INPUT 1 inserts above our rules without changing rule COUNT
     # Hashing the ordered output catches position changes that file-presence checks miss
-    if command -v iptables &>/dev/null; then
-        iptables -L -n -v --line-numbers 2>/dev/null | sha256sum > "${BASELINE_DIR}/fw_base.txt"
-    elif command -v ufw &>/dev/null; then
+    if command -v ufw &>/dev/null; then
         ufw status numbered 2>/dev/null | sha256sum > "${BASELINE_DIR}/fw_base.txt"
     elif command -v firewall-cmd &>/dev/null; then
         firewall-cmd --list-all 2>/dev/null | sha256sum > "${BASELINE_DIR}/fw_base.txt"
+    elif command -v iptables &>/dev/null; then
+        iptables -L -n -v --line-numbers 2>/dev/null | sha256sum > "${BASELINE_DIR}/fw_base.txt"
     fi
+    # Always baseline raw nftables separately - ufw/firewalld may not expose all nft rules
+    nft list ruleset 2>/dev/null | sha256sum > "${BASELINE_DIR}/nft_base.txt" || \
+        echo "ABSENT" > "${BASELINE_DIR}/nft_base.txt"
+
+    # at jobs baseline
+    atq 2>/dev/null | sha256sum > "${BASELINE_DIR}/atjobs_base.txt" || \
+        echo "ABSENT" > "${BASELINE_DIR}/atjobs_base.txt"
+
+    # User systemd units baseline - catches lingering user persistence
+    find /home /root -path '*/.config/systemd/user/*.service' 2>/dev/null | \
+        sort | xargs sha256sum 2>/dev/null > "${BASELINE_DIR}/user_systemd_base.txt" || \
+        echo "ABSENT" > "${BASELINE_DIR}/user_systemd_base.txt"
+
+    # SSH ForceCommand/Match/sshrc baseline
+    { grep -rn 'ForceCommand\|Match User\|Match Address' \
+        /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
+      find /home /root -name ".ssh" -type d 2>/dev/null | \
+        while read -r d; do [[ -f "$d/rc" ]] && cat "$d/rc"; done
+      [[ -f /etc/ssh/sshrc ]] && cat /etc/ssh/sshrc; } | \
+        sha256sum > "${BASELINE_DIR}/ssh_hooks_base.txt" 2>/dev/null || true
 
     echo "[+] Baselines ready"
 }
@@ -333,26 +353,64 @@ check_ldpreload() {
 }
 
 # -- Check 8c: Firewall rule order --------------------------------------------
-# iptables -I INPUT 1 inserts a rule at the top of the chain above your ACCEPT rules
-# This can whitelist attacker IPs or open backdoor ports without removing your rules
-# A count-only or list-presence check won't catch position changes —
-# only hashing the full ordered output will detect insertion vs. append
 check_firewall() {
     local cur=""
-    if command -v iptables &>/dev/null; then
-        cur=$(iptables -L -n -v --line-numbers 2>/dev/null | sha256sum)
-    elif command -v ufw &>/dev/null; then
+    if command -v ufw &>/dev/null; then
         cur=$(ufw status numbered 2>/dev/null | sha256sum)
     elif command -v firewall-cmd &>/dev/null; then
         cur=$(firewall-cmd --list-all 2>/dev/null | sha256sum)
+    elif command -v iptables &>/dev/null; then
+        cur=$(iptables -L -n -v --line-numbers 2>/dev/null | sha256sum)
     fi
     [[ -z "$cur" ]] && return
     local base
     base=$(cat "${BASELINE_DIR}/fw_base.txt" 2>/dev/null || echo "")
     if [[ -n "$base" && "$cur" != "$base" ]]; then
         alert "FIREWALL RULES CHANGED — possible rule insertion or removal"
-        echo "  Run: iptables -L -n -v --line-numbers  to inspect current state"
         echo "$cur" > "${BASELINE_DIR}/fw_base.txt"
+    fi
+    # Check raw nftables separately — changes here may not appear in ufw/firewalld output
+    local nft_cur nft_base
+    nft_cur=$(nft list ruleset 2>/dev/null | sha256sum || echo "ABSENT")
+    nft_base=$(cat "${BASELINE_DIR}/nft_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$nft_cur" != "$nft_base" ]]; then
+        alert "NFTABLES CHANGED — run: nft list ruleset"
+        echo "$nft_cur" > "${BASELINE_DIR}/nft_base.txt"
+    fi
+}
+
+# -- Check 8d: SSH hooks and user systemd persistence -------------------------
+check_ssh_hooks() {
+    local cur
+    cur=$({ grep -rn 'ForceCommand\|Match User\|Match Address' \
+              /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
+            find /home /root -name ".ssh" -type d 2>/dev/null | \
+              while read -r d; do [[ -f "$d/rc" ]] && cat "$d/rc"; done
+            [[ -f /etc/ssh/sshrc ]] && cat /etc/ssh/sshrc; } | sha256sum 2>/dev/null || echo "")
+    local base
+    base=$(cat "${BASELINE_DIR}/ssh_hooks_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "SSH HOOKS CHANGED — ForceCommand, Match block, or sshrc modified"
+        echo "  Run: grep -rn ForceCommand /etc/ssh/ && ls -la /etc/ssh/sshrc ~/.ssh/rc"
+        echo "$cur" > "${BASELINE_DIR}/ssh_hooks_base.txt"
+    fi
+    # Check user systemd units (lingering backdoors)
+    local usvc_cur usvc_base
+    usvc_cur=$(find /home /root -path '*/.config/systemd/user/*.service' 2>/dev/null | \
+               sort | xargs sha256sum 2>/dev/null | sha256sum || echo "ABSENT")
+    usvc_base=$(cat "${BASELINE_DIR}/user_systemd_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$usvc_cur" != "$usvc_base" ]]; then
+        alert "USER SYSTEMD UNIT CHANGED — possible lingering persistence"
+        echo "  Run: find /home /root -path '*/.config/systemd/user/*.service'"
+        echo "$usvc_cur" > "${BASELINE_DIR}/user_systemd_base.txt"
+    fi
+    # Check at jobs
+    local at_cur at_base
+    at_cur=$(atq 2>/dev/null | sha256sum || echo "ABSENT")
+    at_base=$(cat "${BASELINE_DIR}/atjobs_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$at_cur" != "$at_base" ]]; then
+        alert "AT JOB QUEUE CHANGED — run: atq"
+        echo "$at_cur" > "${BASELINE_DIR}/atjobs_base.txt"
     fi
 }
 
@@ -488,6 +546,7 @@ while true; do
         check_sudoers
         check_ldpreload
         check_firewall
+        check_ssh_hooks
         check_suid        # throttled internally to every 10 min
         check_disk
         status_snapshot

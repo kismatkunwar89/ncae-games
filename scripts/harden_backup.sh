@@ -144,9 +144,23 @@ fi
 echo "[*] Configuring firewall (backup segmentation)..."
 
 if [[ "$FW" == "ufw" ]]; then
-    # Backup VM is not scored - skip ufw to avoid SSH session freeze on netfilter reload
-    # SSH is restricted via AllowUsers in sshd_config.d/ncae_harden.conf instead
-    echo "[*] Skipping ufw on backup VM (not scored, SSH restricted via sshd AllowUsers)"
+    # Apply minimal deny-by-default UFW even though backup VM is not scored.
+    # Without this, a surviving foothold or custom listener on the Ubuntu backup VM
+    # stays reachable from anywhere on the network even after sshd AllowUsers restricts SSH.
+    # sshd AllowUsers only restricts SSH - it does nothing for other ports.
+    echo "[*] Applying minimal UFW on backup VM..."
+    ufw --force reset
+    ufw default deny incoming
+    ufw default deny outgoing
+    # SSH from internal LAN only - backup VM should never accept SSH from WAN
+    ufw allow in from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN"
+    # Allow rsync/SCP inbound from all internal VMs (backup_configs.sh pushes here)
+    ufw allow in from "192.168.${TEAM}.0/24" comment "internal LAN backup rsync"
+    # Outbound: internal LAN + DNS resolution only
+    ufw allow out to "192.168.${TEAM}.0/24" comment "internal LAN outbound"
+    ufw allow out to any port 53 comment "DNS resolution"
+    ufw --force enable
+    echo "[+] UFW enabled on backup VM"
 
 elif [[ "$FW" == "firewalld" ]]; then
     systemctl enable firewalld 2>/dev/null || true

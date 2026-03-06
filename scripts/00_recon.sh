@@ -146,8 +146,44 @@ for f in /etc/ssh/sshd_config /etc/apache2/apache2.conf /etc/nginx/nginx.conf \
     if [[ -f "$f" ]]; then echo "  EXISTS: $f"; fi
 done
 
-# -- Firewall status -----------------------------------------------------------
-# Tries ufw first (Ubuntu), then firewalld (Rocky), then falls back to raw iptables
+# -- at jobs -------------------------------------------------------------------
+# 'at' schedules one-time jobs - less visible than cron, often overlooked
+echo ""
+echo "[ AT JOBS ]"
+atq 2>/dev/null || echo "  (at not installed or no jobs)"
+
+# -- User-level systemd units and lingering users -----------------------------
+# Lingering users have their systemd units started at boot without login.
+# A red team backdoor in ~/.config/systemd/user/ survives reboots invisibly.
+echo ""
+echo "[ SYSTEMD LINGERING USERS ]"
+loginctl list-users 2>/dev/null || true
+for u in $(loginctl list-users 2>/dev/null | awk 'NR>1{print $2}'); do
+    LINGER=$(loginctl show-user "$u" 2>/dev/null | grep "^Linger=" || echo "Linger=no")
+    echo "  $u: $LINGER"
+done
+echo ""
+echo "[ USER SYSTEMD UNITS ]"
+find /home /root -path '*/.config/systemd/user/*.service' 2>/dev/null | \
+    while read -r f; do echo "  [!] $f"; cat "$f"; done || echo "  None found"
+
+# -- SSH config backdoors (ForceCommand, Match, sshrc) -------------------------
+# ForceCommand executes a command on every SSH login regardless of what user runs
+# Match blocks can grant root or bypass restrictions for specific users/IPs
+# sshrc runs on every interactive login - classic persistence hook
+echo ""
+echo "[ SSH CONFIG - ForceCommand / Match blocks ]"
+grep -rn 'ForceCommand\|Match User\|Match Address\|AcceptEnv' \
+    /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null || echo "  None found"
+echo ""
+echo "[ SSH HOOKS - sshrc / rc files ]"
+[[ -f /etc/ssh/sshrc ]] && echo "  [!] /etc/ssh/sshrc EXISTS:" && cat /etc/ssh/sshrc
+find /home /root -name ".ssh" -type d 2>/dev/null | while read -r d; do
+    [[ -f "$d/rc" ]] && echo "  [!] $d/rc EXISTS:" && cat "$d/rc"
+done || true
+
+# -- Firewall status (including raw nftables) ----------------------------------
+# Check ALL firewall layers: ufw/firewalld may coexist with or mask raw nft rules
 echo ""
 echo "[ FIREWALL STATUS ]"
 if command -v ufw &>/dev/null; then
@@ -157,6 +193,10 @@ elif command -v firewall-cmd &>/dev/null; then
 else
     iptables -L -n 2>/dev/null | head -30
 fi
+# Always also dump raw nftables - may contain rules invisible to ufw/firewalld
+echo ""
+echo "[ NFTABLES (raw - may differ from ufw/firewalld view) ]"
+nft list ruleset 2>/dev/null | head -60 || echo "  (nft not available)"
 
 # -- Network connections -------------------------------------------------------
 # Shows currently established connections - active sessions right now

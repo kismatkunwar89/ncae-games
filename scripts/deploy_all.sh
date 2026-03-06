@@ -108,6 +108,16 @@ echo ""
 echo "[PHASE 1] Recon..."
 run_script "00_recon.sh"
 
+# -- Phase 1b: Persistence sweep -----------------------------------------------
+# CRITICAL: run BEFORE hardening and BEFORE monitor baselines.
+# If red team pre-seeded a foothold (PAM module, systemd drop-in, LD_PRELOAD,
+# rc.local hook, kernel module) it must be found and removed NOW.
+# The monitor snapshots the system state after this phase - anything surviving
+# into Phase 2 becomes "normal baseline" and will never alert again.
+echo ""
+echo "[PHASE 1b] Persistence sweep (must complete before monitor baselines)..."
+run_script "backdoor_hunt.sh"
+
 # -- Phase 2: Harden -----------------------------------------------------------
 echo ""
 echo "[PHASE 2] Hardening: $ROLE"
