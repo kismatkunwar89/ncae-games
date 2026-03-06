@@ -66,7 +66,12 @@ while IFS= read -r user; do
         for _grp in sudo wheel docker disk shadow adm lxd lxc kvm libvirt; do
             gpasswd -d "$user" "$_grp" 2>/dev/null || true
         done
-        echo "  [-] Locked + stripped privileged groups: $user"
+        _home=$(getent passwd "$user" | cut -d: -f6)
+        if [[ -n "$_home" && -f "$_home/.ssh/authorized_keys" ]]; then
+            cp "$_home/.ssh/authorized_keys" "$_home/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
+            : > "$_home/.ssh/authorized_keys"
+        fi
+        echo "  [-] Locked + stripped groups + cleared keys: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
 
@@ -74,6 +79,13 @@ done < <(cut -d: -f1 /etc/passwd)
 ROOT_PASS=$(gen_pass 20)
 echo "root:$ROOT_PASS" | chpasswd 2>/dev/null || true
 echo "ROOT password: $ROOT_PASS" >> "$CRED_FILE"
+# Root uses password auth from internal LAN (AllowUsers root@192.168.t.0/24)
+# No key-based root login needed — clear it to remove any planted backdoor keys
+if [[ -f /root/.ssh/authorized_keys ]]; then
+    cp /root/.ssh/authorized_keys "/root/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
+    : > /root/.ssh/authorized_keys
+    echo "[*] Cleared root authorized_keys"
+fi
 
 # -- 4. Create jailed users for common accounts --------------------------
 echo "[*] Creating jailed users..."

@@ -93,14 +93,24 @@ while IFS= read -r user; do
         for _grp in sudo wheel docker disk shadow adm lxd lxc kvm libvirt; do
             gpasswd -d "$user" "$_grp" 2>/dev/null || true
         done
+        _home=$(getent passwd "$user" | cut -d: -f6)
+        if [[ -n "$_home" && -f "$_home/.ssh/authorized_keys" ]]; then
+            cp "$_home/.ssh/authorized_keys" "$_home/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
+            : > "$_home/.ssh/authorized_keys"
+        fi
         echo "USER $user : $NEW_PASS" >> "$CRED_FILE"
-        echo "  [-] Locked + stripped privileged groups: $user"
+        echo "  [-] Locked + stripped groups + cleared keys: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
 
 ROOT_PASS=$(gen_pass 20)
 echo "root:$ROOT_PASS" | chpasswd 2>/dev/null || true
 echo "ROOT password: $ROOT_PASS" >> "$CRED_FILE"
+if [[ -f /root/.ssh/authorized_keys ]]; then
+    cp /root/.ssh/authorized_keys "/root/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
+    : > /root/.ssh/authorized_keys
+    echo "[*] Cleared root authorized_keys"
+fi
 
 # -- 4. jailed users ------------------------------------------------------
 echo "[*] Creating jailed users..."
