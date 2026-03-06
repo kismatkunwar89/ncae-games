@@ -62,7 +62,8 @@ while IFS= read -r user; do
         echo "$user:$NEW_PASS" | chpasswd 2>/dev/null || true
         echo "USER $user : $NEW_PASS" >> "$CRED_FILE"
         usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true
-        echo "  [-] Locked shell + changed password: $user"
+        passwd -l "$user" 2>/dev/null || true
+        echo "  [-] Locked shell + password + account: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
 
