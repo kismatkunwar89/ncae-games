@@ -131,17 +131,34 @@ snapshot_baseline() {
         echo "ABSENT" > "${BASELINE_DIR}/atjobs_base.txt"
 
     # User systemd units baseline - catches lingering user persistence
+    # IMPORTANT: must use | sha256sum to match format used by check_ssh_hooks() live check
     find /home /root -path '*/.config/systemd/user/*.service' 2>/dev/null | \
-        sort | xargs sha256sum 2>/dev/null > "${BASELINE_DIR}/user_systemd_base.txt" || \
+        sort | xargs sha256sum 2>/dev/null | sha256sum > "${BASELINE_DIR}/user_systemd_base.txt" || \
         echo "ABSENT" > "${BASELINE_DIR}/user_systemd_base.txt"
 
-    # SSH ForceCommand/Match/sshrc baseline
-    { grep -rn 'ForceCommand\|Match User\|Match Address' \
+    # SSH ForceCommand/Match/sshrc/cert baseline
+    { grep -rn 'ForceCommand\|Match User\|Match Address\|TrustedUserCAKeys\|AuthorizedPrincipalsFile' \
         /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
       find /home /root -name ".ssh" -type d 2>/dev/null | \
-        while read -r d; do [[ -f "$d/rc" ]] && cat "$d/rc"; done
+        while read -r d; do
+            [[ -f "$d/rc" ]] && cat "$d/rc"
+            [[ -f "$d/authorized_principals" ]] && cat "$d/authorized_principals"
+        done
       [[ -f /etc/ssh/sshrc ]] && cat /etc/ssh/sshrc; } | \
         sha256sum > "${BASELINE_DIR}/ssh_hooks_base.txt" 2>/dev/null || true
+
+    # Shell history suppression baseline — T1562.003
+    { grep -rh 'HISTFILE\|HISTCONTROL\|HISTSIZE\|unset HIST' \
+        /root/.bashrc /root/.bash_profile /home/*/.bashrc /home/*/.bash_profile \
+        /etc/profile /etc/bash.bashrc /etc/profile.d/*.sh 2>/dev/null; } | \
+        sort | sha256sum > "${BASELINE_DIR}/hist_suppress_base.txt" || \
+        echo "ABSENT" > "${BASELINE_DIR}/hist_suppress_base.txt"
+
+    # Running containers baseline — T1543.005
+    { command -v docker &>/dev/null && docker ps -q 2>/dev/null | sort || true
+      command -v podman &>/dev/null && podman ps -q 2>/dev/null | sort || true; } \
+        > "${BASELINE_DIR}/containers_base.txt" 2>/dev/null || \
+        echo "ABSENT" > "${BASELINE_DIR}/containers_base.txt"
 
     # Systemd timer baseline — T1053.006
     {   find /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system \
@@ -429,10 +446,13 @@ check_firewall() {
 # -- Check 8d: SSH hooks and user systemd persistence -------------------------
 check_ssh_hooks() {
     local cur
-    cur=$({ grep -rn 'ForceCommand\|Match User\|Match Address' \
+    cur=$({ grep -rn 'ForceCommand\|Match User\|Match Address\|TrustedUserCAKeys\|AuthorizedPrincipalsFile' \
               /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
             find /home /root -name ".ssh" -type d 2>/dev/null | \
-              while read -r d; do [[ -f "$d/rc" ]] && cat "$d/rc"; done
+              while read -r d; do
+                  [[ -f "$d/rc" ]] && cat "$d/rc"
+                  [[ -f "$d/authorized_principals" ]] && cat "$d/authorized_principals"
+              done
             [[ -f /etc/ssh/sshrc ]] && cat /etc/ssh/sshrc; } | sha256sum 2>/dev/null || echo "")
     local base
     base=$(cat "${BASELINE_DIR}/ssh_hooks_base.txt" 2>/dev/null || echo "")
@@ -604,6 +624,47 @@ check_modules() {
     fi
 }
 
+# -- Check: Shell history suppression (T1562.003) ------------------------------
+# HISTFILE=/dev/null or HISTSIZE=0 in RC files means commands go unlogged
+check_histsuppress() {
+    local cur
+    cur=$({ grep -rh 'HISTFILE\|HISTCONTROL\|HISTSIZE\|unset HIST' \
+            /root/.bashrc /root/.bash_profile /home/*/.bashrc /home/*/.bash_profile \
+            /etc/profile /etc/bash.bashrc /etc/profile.d/*.sh 2>/dev/null; } | sort | sha256sum || echo "ABSENT")
+    local base
+    base=$(cat "${BASELINE_DIR}/hist_suppress_base.txt" 2>/dev/null || echo "ABSENT")
+    if [[ "$cur" != "$base" ]]; then
+        alert "SHELL HISTORY CONFIG CHANGED (T1562.003) — check for HISTFILE=/dev/null or HISTSIZE=0"
+        grep -rh 'HISTFILE=/dev/null\|HISTSIZE=0\|HISTCONTROL.*ignorespace\|unset HISTFILE' \
+            /root/.bashrc /home/*/.bashrc /etc/profile /etc/profile.d/*.sh 2>/dev/null | \
+            sed 's/^/  [!] /' || true
+        echo "$cur" > "${BASELINE_DIR}/hist_suppress_base.txt"
+    fi
+}
+
+# -- Check: Container persistence (T1543.005) ----------------------------------
+# Running containers survive reboots if restart policy is set; new containers = red flag
+check_containers() {
+    local running=0
+    command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null && running=1
+    command -v podman &>/dev/null && running=1
+    [[ $running -eq 0 ]] && return
+    local cur
+    cur=$({ command -v docker &>/dev/null && docker ps -q 2>/dev/null | sort || true
+            command -v podman &>/dev/null && podman ps -q 2>/dev/null | sort || true; } 2>/dev/null)
+    local base
+    base=$(cat "${BASELINE_DIR}/containers_base.txt" 2>/dev/null || echo "")
+    if [[ -n "$base" && "$cur" != "$base" ]]; then
+        alert "RUNNING CONTAINERS CHANGED (T1543.005) — docker/podman container started or stopped"
+        docker ps --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null | sed 's/^/  docker: /' || true
+        podman ps --format '{{.Names}} {{.Image}} {{.Status}}' 2>/dev/null | sed 's/^/  podman: /' || true
+        echo "$cur" > "${BASELINE_DIR}/containers_base.txt"
+    elif [[ -z "$base" && -n "$cur" ]]; then
+        alert "CONTAINER RUNTIME ACTIVE (T1543.005) — docker/podman containers running on this VM"
+        echo "$cur" > "${BASELINE_DIR}/containers_base.txt"
+    fi
+}
+
 # -- Check: Web server child process behavioral (T1505.003) --------------------
 # Web shells show as web worker spawning a shell/interpreter child
 check_webproc() {
@@ -767,6 +828,8 @@ while true; do
         check_linker
         check_auditd
         check_modules
+        check_histsuppress
+        check_containers
         check_webproc
         check_suid        # throttled internally to every 10 min
         check_disk

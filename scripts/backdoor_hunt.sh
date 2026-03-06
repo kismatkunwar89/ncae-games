@@ -467,7 +467,75 @@ echo "$PATH" | tr ':' '\n' | while read -r dir; do
     fi
 done
 
-# ── 17. SYSTEMD TIMERS & GENERATORS ──────────────────────────────────────────
+# ── 17. SSH CERTIFICATE / PRINCIPAL PERSISTENCE ───────────────────────────────
+head "SSH CERTIFICATE PERSISTENCE (T1098.004)"
+
+echo "[*] TrustedUserCAKeys — any CA key here grants SSH access for all users it signs:"
+if grep -rn 'TrustedUserCAKeys' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
+    flag "TrustedUserCAKeys is set — verify the CA file and all principals it grants access to"
+    grep -rn 'TrustedUserCAKeys' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | \
+        awk '{print $2}' | while read -r cafile; do
+            [[ -f "$cafile" ]] && warn "CA key file: $cafile" && cat "$cafile" | sed 's/^/  /'
+        done
+else
+    ok "TrustedUserCAKeys not set"
+fi
+
+echo "[*] AuthorizedPrincipalsFile — overrides authorized_keys; maps cert principals to users:"
+if grep -rn 'AuthorizedPrincipalsFile' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
+    flag "AuthorizedPrincipalsFile is set — check what principals are allowed"
+    grep -rn 'AuthorizedPrincipalsFile' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
+else
+    ok "AuthorizedPrincipalsFile not set"
+fi
+
+echo "[*] Scanning per-user authorized_principals files:"
+while IFS=: read -r user _ uid _ _ homedir _; do
+    [[ $uid -lt 500 && $uid -ne 0 ]] && continue
+    pfile="$homedir/.ssh/authorized_principals"
+    [[ ! -f "$pfile" ]] && continue
+    flag "authorized_principals file found: $pfile"
+    cat "$pfile" | sed 's/^/  principal: /'
+done < /etc/passwd
+
+echo "[*] SSH certificates in use (ssh-keygen -L to inspect):"
+for home in /root /home/*; do
+    for keyfile in "$home/.ssh/authorized_keys" "$home/.ssh/id_"*"-cert.pub"; do
+        [[ ! -f "$keyfile" ]] && continue
+        if grep -q 'cert-authority' "$keyfile" 2>/dev/null; then
+            flag "cert-authority key in $keyfile — a signed cert from this CA grants access"
+            grep 'cert-authority' "$keyfile" | sed 's/^/  /'
+        fi
+    done
+done
+
+# ── 18. CONTAINER PERSISTENCE ─────────────────────────────────────────────────
+head "CONTAINER PERSISTENCE (T1543.005)"
+
+echo "[*] Docker daemon and restart-always containers:"
+if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+    flag "Docker is RUNNING — unexpected on competition VMs"
+    docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | sed 's/^/  /'
+    # Restart-always containers survive reboots even without a systemd unit
+    restart_always=$(docker inspect $(docker ps -q 2>/dev/null) 2>/dev/null | \
+        python3 -c "import json,sys; cs=json.load(sys.stdin); [print(c['Name'],c['HostConfig']['RestartPolicy']['Name']) for c in cs]" 2>/dev/null | \
+        grep -v 'no\|unless-stopped' || true)
+    [[ -n "$restart_always" ]] && flag "Container with restart-always: $restart_always"
+else
+    ok "Docker not running"
+fi
+
+echo "[*] Podman containers and quadlets:"
+if command -v podman &>/dev/null; then
+    warn "Podman is installed"
+    podman ps -a 2>/dev/null | grep -v '^CONTAINER' | sed 's/^/  /'
+    # Podman quadlets auto-generate systemd units from ~/.config/containers/systemd/
+    find /home /root -path '*/.config/containers/systemd/*' -type f 2>/dev/null | while read -r f; do
+        flag "Podman quadlet (auto-systemd): $f"
+    done
+fi
+
+# ── 19. SYSTEMD TIMERS & GENERATORS ──────────────────────────────────────────
 head "SYSTEMD TIMERS & GENERATORS (T1053.006 / T1543.002)"
 
 echo "[*] All .timer units — look for unexpected entries:"
@@ -534,7 +602,7 @@ done
 
 echo "[*] .so files in world-writable or non-standard library paths:"
 # Check for .so files outside standard system lib dirs — may indicate planted library
-find /tmp /var/tmp /dev/shm /home /opt /srv -name '*.so' -o -name '*.so.*' 2>/dev/null | while read -r f; do
+find /tmp /var/tmp /dev/shm /home /opt /srv \( -name '*.so' -o -name '*.so.*' \) -type f 2>/dev/null | while read -r f; do
     flag ".so file in unusual path: $f"
 done
 
