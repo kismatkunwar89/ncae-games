@@ -240,9 +240,10 @@ apt-get install -y ufw 2>/dev/null || true
 ufw --force reset
 ufw default deny incoming
 ufw default deny outgoing
-ufw allow 22/tcp    comment "SSH"
-# Validated TEAM var used here - safe
+ufw allow from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN only"
+# Postgres: internal LAN (our VMs) + scoring engine (172.18.0.0/16 queries DB directly for scoring)
 ufw allow from "192.168.${TEAM}.0/24" to any port 5432 comment "Postgres internal LAN"
+ufw allow from "172.18.0.0/16" to any port 5432 comment "Postgres scoring engine"
 ufw allow out to "192.168.${TEAM}.0/24" comment "Internal LAN outbound"
 ufw allow out to "172.18.0.0/16" comment "Scoring engine outbound"
 ufw allow out to any port 53 comment "DNS resolution"

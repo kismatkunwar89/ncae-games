@@ -131,7 +131,9 @@ echo "[*] Configuring UFW..."
 ufw --force reset
 ufw default deny incoming
 ufw default deny outgoing
-ufw allow 22/tcp    comment "SSH"
+# SSH: internal LAN only — shell VM is the WAN SSH endpoint, not www
+ufw allow from "192.168.${TEAM}.0/24" to any port 22 comment "SSH internal LAN only"
+# HTTP/HTTPS: open to all — scoring engine hits these from 172.18.0.0/16
 ufw allow 80/tcp    comment "HTTP scoring"
 ufw allow 443/tcp   comment "HTTPS scoring"
 ufw allow out to "192.168.${TEAM}.0/24" comment "Internal LAN outbound"
