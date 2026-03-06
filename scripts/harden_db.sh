@@ -20,16 +20,18 @@ echo "[$(date)] === DB Hardening START ==="
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
-# Validated team detection
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "")
+# Use TEAM from deploy_all.sh env if available, otherwise auto-detect or prompt
+if [[ -z "${TEAM:-}" ]] || ! [[ "${TEAM}" =~ ^[0-9]+$ ]]; then
+    TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "")
+fi
 if [[ -z "$TEAM" ]] || ! [[ "$TEAM" =~ ^[0-9]+$ ]]; then
     echo "[!] Could not auto-detect team number from IP."
     read -rp "    Enter team number manually: " TEAM
 fi
 echo "[*] Team: $TEAM"
 # Network topology — inherited from deploy_all.sh or computed here for standalone runs
-NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
-NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 echo "[*] LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 

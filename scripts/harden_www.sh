@@ -18,7 +18,7 @@ echo "[$(date)] === WWW Hardening START ==="
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")
+TEAM="${TEAM:-$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")}"
 # Network topology — inherited from deploy_all.sh or computed here for standalone runs
 NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
 NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"

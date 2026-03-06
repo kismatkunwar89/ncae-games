@@ -35,8 +35,8 @@ if [[ -z "$TEAM" || -z "$ROUTER_IP" ]]; then
 fi
 
 # Network topology — inherited from deploy_all.sh or computed here for standalone runs
-NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
-NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 
 gen_pass() {

@@ -96,6 +96,8 @@ export NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
 export NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 # Derive LAN base prefix (e.g. "192.168.5" from "192.168.5.0/24") for building host IPs
 export NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+# Export TEAM so harden scripts don't re-detect from IP (important when subnet != 192.168.x.x)
+export TEAM
 echo "[*] Team=$TEAM  Role=$ROLE  LAN=${NCAE_LAN}  Scoring=${NCAE_SCORING}"
 
 # -- Operator detection --------------------------------------------------------

@@ -21,11 +21,15 @@ echo "[$(date)] === DNS Hardening START ==="
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")
+TEAM="${TEAM:-$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")}"
 # Network topology — inherited from deploy_all.sh or computed here for standalone runs
-NCAE_LAN="${NCAE_LAN:-${NCAE_LAN}}"
-NCAE_SCORING="${NCAE_SCORING:-${NCAE_SCORING}}"
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+# Derive BIND reverse zone name from NCAE_LAN (works for any /24: 192.168.5.0/24 -> 5.168.192, 10.5.0.0/24 -> 0.5.10)
+_lan_ip="${NCAE_LAN%%/*}"
+IFS='.' read -r _o1 _o2 _o3 _o4 <<< "$_lan_ip"
+NCAE_REV_ZONE="${_o3}.${_o2}.${_o1}.in-addr.arpa"
 SERIAL=$(date +%s)  # Unix epoch timestamp used as zone serial number
 # Benefits: always a valid 32-bit uint, auto-increments on every run, no manual management
 # BIND requires serial to increase on every zone change for secondaries to pick up updates
@@ -213,7 +217,7 @@ zone "team${TEAM}.local" IN {
 };
 
 /* --- REVERSE ZONE (internal) --- */
-zone "${TEAM}.168.192.in-addr.arpa" IN {
+zone "${NCAE_REV_ZONE}" IN {
     type master;
     file "/var/named/team${TEAM}.local.rev";
     allow-update { none; };
@@ -285,7 +289,7 @@ restorecon -Rv /var/named/ 2>/dev/null || true
 echo "[*] Validating BIND config..."
 if named-checkconf /etc/named.conf 2>&1; then
     named-checkzone "team${TEAM}.local" "/var/named/team${TEAM}.local.fwd" 2>&1 || true
-    named-checkzone "${TEAM}.168.192.in-addr.arpa" "/var/named/team${TEAM}.local.rev" 2>&1 || true
+    named-checkzone "${NCAE_REV_ZONE}" "/var/named/team${TEAM}.local.rev" 2>&1 || true
     systemctl enable named && systemctl restart named
     echo "[+] BIND started"
 else
