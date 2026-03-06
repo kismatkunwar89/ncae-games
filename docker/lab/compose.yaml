@@ -1,0 +1,149 @@
+name: ncae-lab
+
+x-common: &common
+  privileged: true
+  stdin_open: true
+  tty: true
+  tmpfs:
+    - /run
+    - /run/lock
+    - /tmp
+  volumes:
+    - ../../:/opt/ncae
+    - ./logs:/vagrant/logs
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+  environment:
+    NCAE_AUTO_ACCEPT: "1"
+    NCAE_SKIP_BACKUP: "1"
+    NCAE_SKIP_SCRIPT_LOCK: "1"
+
+services:
+  router:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/ubuntu-systemd.Dockerfile
+    hostname: router
+    container_name: ncae-router
+    command: ["/sbin/init"]
+    networks:
+      ncae_external:
+        ipv4_address: 172.18.13.1
+      ncae_internal:
+        ipv4_address: 192.168.1.1
+
+  scoring:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/ubuntu-systemd.Dockerfile
+    hostname: scoring
+    container_name: ncae-scoring
+    command: ["/sbin/init"]
+    networks:
+      ncae_external:
+        ipv4_address: 172.18.0.38
+
+  shell:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/rocky-systemd.Dockerfile
+    hostname: shell
+    container_name: ncae-shell
+    command: ["/sbin/init"]
+    environment:
+      NCAE_AUTO_ACCEPT: "1"
+      NCAE_SKIP_BACKUP: "1"
+      NCAE_SKIP_SCRIPT_LOCK: "1"
+      NCAE_SKIP_UPDATE: "1"
+      NCAE_SKIP_INSTALL: "1"
+      NCAE_SCORING_PASS: "LabShell123!A"
+    networks:
+      ncae_external:
+        ipv4_address: 172.18.14.1
+
+  www:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/ubuntu-systemd.Dockerfile
+    hostname: www
+    container_name: ncae-www
+    command: ["/sbin/init"]
+    environment:
+      NCAE_AUTO_ACCEPT: "1"
+      NCAE_SKIP_BACKUP: "1"
+      NCAE_SKIP_SCRIPT_LOCK: "1"
+      NCAE_SKIP_UPDATE: "1"
+      NCAE_SKIP_INSTALL: "1"
+    networks:
+      ncae_internal:
+        ipv4_address: 192.168.1.5
+
+  db:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/ubuntu-systemd.Dockerfile
+    hostname: db
+    container_name: ncae-db
+    command: ["/sbin/init"]
+    environment:
+      NCAE_AUTO_ACCEPT: "1"
+      NCAE_SKIP_BACKUP: "1"
+      NCAE_SKIP_SCRIPT_LOCK: "1"
+      NCAE_SKIP_UPDATE: "1"
+      NCAE_SKIP_INSTALL: "1"
+      NCAE_DB_PASS: "LabDb123!A"
+    networks:
+      ncae_internal:
+        ipv4_address: 192.168.1.7
+
+  dns:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/rocky-systemd.Dockerfile
+    hostname: dns
+    container_name: ncae-dns
+    command: ["/sbin/init"]
+    environment:
+      NCAE_AUTO_ACCEPT: "1"
+      NCAE_SKIP_BACKUP: "1"
+      NCAE_SKIP_SCRIPT_LOCK: "1"
+      NCAE_SKIP_UPDATE: "1"
+      NCAE_SKIP_INSTALL: "1"
+    networks:
+      ncae_internal:
+        ipv4_address: 192.168.1.12
+
+  backup:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: docker/lab/ubuntu-systemd.Dockerfile
+    hostname: backup
+    container_name: ncae-backup
+    command: ["/sbin/init"]
+    environment:
+      NCAE_AUTO_ACCEPT: "1"
+      NCAE_SKIP_BACKUP: "1"
+      NCAE_SKIP_SCRIPT_LOCK: "1"
+      NCAE_SKIP_UPDATE: "1"
+      NCAE_SKIP_INSTALL: "1"
+    networks:
+      ncae_internal:
+        ipv4_address: 192.168.1.15
+
+networks:
+  ncae_external:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+  ncae_internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24

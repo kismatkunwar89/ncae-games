@@ -43,7 +43,14 @@ sudo bash /root/ncae_lock_ssh.sh   # only after confirming key works
 
 ---
 
-## PHASE 3 — MONITOR
+## PHASE 3 — BACKUP
+```bash
+sudo bash /opt/ncae/backup_configs.sh
+```
+
+---
+
+## PHASE 4 — MONITOR
 
 ### monitor.sh (service watchdog + alerts)
 ```bash
@@ -106,7 +113,7 @@ sudo bash /opt/ncae/backdoor_hunt.sh
 
 ---
 
-## PHASE 4 — RESPOND
+## PHASE 5 — RESPOND
 
 Use the IR script for everything — it's faster than manual commands:
 ```bash

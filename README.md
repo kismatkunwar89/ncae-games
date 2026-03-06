@@ -105,6 +105,57 @@ tail -f /vagrant/logs/ncae_alerts.log
 
 ---
 
+## Docker Lab
+
+For subnet-aware testing, there is a small multi-container lab under [docker/lab/compose.yaml](/home/kismat/repos/ncae-games/docker/lab/compose.yaml).
+
+Bring the lab up with:
+
+```bash
+bash docker/lab/up.sh
+```
+
+Useful commands:
+
+```bash
+bash docker/lab/status.sh
+bash docker/lab/deploy-role.sh shell
+bash docker/lab/deploy-role.sh www
+bash docker/lab/deploy-role.sh db
+bash docker/lab/deploy-role.sh dns
+bash docker/lab/deploy-role.sh backup
+bash docker/lab/down.sh
+```
+
+The lab uses Team 1-style addresses so `deploy_all.sh` role detection has something realistic to match:
+- `router` on `172.18.13.1` and `192.168.1.1`
+- `scoring` on `172.18.0.38`
+- `shell` on `172.18.14.1`
+- `www` on `192.168.1.5`
+- `db` on `192.168.1.7`
+- `dns` on `192.168.1.12`
+- `backup` on `192.168.1.15`
+
+Lab-only environment flags are wired in so `deploy_all.sh` can run non-interactively and skip backup/script-lock steps:
+- `NCAE_AUTO_ACCEPT=1`
+- `NCAE_SKIP_BACKUP=1`
+- `NCAE_SKIP_SCRIPT_LOCK=1`
+- `NCAE_SKIP_UPDATE=1`
+- `NCAE_SKIP_INSTALL=1`
+
+What this lab is good for:
+- role detection from fixed IPs
+- subnet assumptions and basic reachability
+- config generation and script flow across multiple hosts
+
+What it still does **not** replace:
+- a true VM test for firewall behavior
+- reboot persistence validation
+- complete `systemd`, `auditd`, SELinux, quota, PAM, and RouterOS realism
+- a real routed/NATed router path; the `router` container is a topology placeholder, not MikroTik emulation
+
+---
+
 ## MITRE ATT&CK Coverage
 
 | Technique | Description | Where covered |
