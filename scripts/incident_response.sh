@@ -401,6 +401,21 @@ status_snapshot() {
     tail -10 /var/log/ncae_alerts.log 2>/dev/null || echo "  None"
 }
 
+# -- 10: Full persistence sweep -----------------------------------------------
+run_backdoor_hunt() {
+    banner "FULL PERSISTENCE SWEEP (backdoor_hunt.sh)"
+    local hunt
+    # Look for backdoor_hunt.sh next to this script first, then /root
+    hunt="$(dirname "$0")/backdoor_hunt.sh"
+    [[ ! -f "$hunt" ]] && hunt="/root/backdoor_hunt.sh"
+    if [[ ! -f "$hunt" ]]; then
+        echo "[!] backdoor_hunt.sh not found. Tried: $(dirname "$0")/ and /root/"
+        return
+    fi
+    echo "[*] Running: $hunt"
+    bash "$hunt"
+}
+
 # -- Main menu -----------------------------------------------------------------
 while true; do
     banner "NCAE INCIDENT RESPONSE - Team $TEAM - $(date '+%H:%M:%S')"
@@ -413,6 +428,7 @@ while true; do
     echo "  7) Restore config from backup"
     echo "  8) Emergency restart all services"
     echo "  9) Status snapshot"
+    echo " 10) Full persistence sweep (backdoor_hunt.sh)"
     echo "  0) Exit"
     echo ""
     read -rp "Choice: " CHOICE
@@ -426,6 +442,7 @@ while true; do
         7) restore_config ;;
         8) restart_all_services ;;
         9) status_snapshot ;;
+       10) run_backdoor_hunt ;;
         0) echo "Exiting."; break ;;
         *) echo "Invalid." ;;
     esac

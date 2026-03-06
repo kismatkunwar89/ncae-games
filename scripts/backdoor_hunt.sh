@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # NCAE Cyber Games 2026 — backdoor_hunt.sh
-# Team NightHax | Full persistence/backdoor sweep
+# UNH Blue Team | Full persistence/backdoor sweep
 #
 # Covers: cron, systemd, PAM, SUID, SSH keys, shell profiles, rc.local,
 #         motd, LD_PRELOAD, kernel modules, /tmp/dev/shm, web shells,

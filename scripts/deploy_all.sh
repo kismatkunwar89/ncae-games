@@ -37,7 +37,7 @@ exec > >(tee -a "$LOGFILE") 2>&1
 START=$(date +%s)
 
 echo "================================================================"
-echo " NCAE CyberGames 2026 - NightHax deploy_all.sh"
+echo " NCAE CyberGames 2026 - UNH Blue Team Toolkit"
 echo " $(date)"
 echo "================================================================"
 
@@ -46,42 +46,42 @@ echo "================================================================"
 # All scripts must live in the same directory as this file
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# -- TEAM detection ------------------------------------------------------------
-# Grab all IP addresses on this machine (one per line)
+# -- TEAM + ROLE detection with confirm/override -------------------------------
+# Auto-detection uses known default topology IPs.
+# If the competition assigns different IPs, press Enter on detected values
+# and type the correct ones — the script uses whatever you confirm.
 MY_IPS=$(ip addr show | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
 
-# First try: extract the third octet from a 192.168.t.x address
-# grep -oP with \K drops everything before the match - returns just the team digit(s)
+# Try 192.168.t.x first, then 172.18.14.t (shell VM)
 TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
-
-if [[ -z "$TEAM" ]]; then
-    # FIXED: Shell VM is on 172.18.14.t specifically - match that subnet, not all of 172.18.*
-    # Without this fix, 172.18.0.1 (the gateway) would give team=0 or team=1 incorrectly
+[[ -z "$TEAM" ]] && \
     TEAM=$(echo "$MY_IPS" | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
-fi
 
-if [[ -z "$TEAM" ]]; then
-    # Last resort: prompt manually
-    read -rp "[?] Could not detect team number. Enter manually: " TEAM
-fi
-echo "[*] Team: $TEAM"
-
-# -- Role detection ------------------------------------------------------------
+# Try role from default last-octet assignments
 ROLE="${1:-auto}"
-if [[ "$ROLE" == "auto" ]]; then
-    # Match IPs against known topology to determine this VM's role
-    if   echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.5";    then ROLE="www"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.7";    then ROLE="db"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.12";   then ROLE="dns"
-    elif echo "$MY_IPS" | grep -q "172\.18\.14\.${TEAM}";    then ROLE="shell"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.15";   then ROLE="backup"
+if [[ "$ROLE" == "auto" && -n "$TEAM" ]]; then
+    if   echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.5";   then ROLE="www"
+    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.7";   then ROLE="db"
+    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.12";  then ROLE="dns"
+    elif echo "$MY_IPS" | grep -q "172\.18\.14\.${TEAM}";   then ROLE="shell"
+    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.15";  then ROLE="backup"
     else
-        echo "[!] Could not detect role from IPs: $MY_IPS"
-        echo "    Roles: www | dns | db | shell | backup | router"
-        read -rp "Enter role: " ROLE
+        ROLE=""
     fi
 fi
-echo "[*] Role: $ROLE"
+
+echo ""
+echo "================================================================"
+echo " Auto-detected:"
+echo "   IPs  : $(echo "$MY_IPS" | tr '\n' ' ')"
+echo "   Team : ${TEAM:-(not found)}"
+echo "   Role : ${ROLE:-(not found)}"
+echo " Roles available: www | dns | db | shell | backup | router"
+echo " Press ENTER to accept detected value, or type to override."
+echo "================================================================"
+read -rp "  Team number [${TEAM}]: " _IN;  [[ -n "$_IN" ]] && TEAM="$_IN"
+read -rp "  Role        [${ROLE}]: " _IN;  [[ -n "$_IN" ]] && ROLE="$_IN"
+echo "[*] Team=$TEAM  Role=$ROLE"
 
 # Wrapper that checks the script exists, makes it executable, runs it, and
 # reports success/failure with the exit code

@@ -180,7 +180,7 @@ EOF
     openssl req -new -newkey rsa:4096 -nodes \
         -keyout "$SSL_DIR/private/server.key" \
         -out "$SSL_DIR/certs/server.csr" \
-        -subj "/CN=${DOMAIN}/O=NightHax/C=US" 2>&1
+        -subj "/CN=${DOMAIN}/O=UNH/C=US" 2>&1
     chmod 600 "$SSL_DIR/private/server.key"
 
     if [[ ! -f "$SSL_DIR/private/server.key" ]]; then
