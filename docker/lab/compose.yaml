@@ -1,5 +1,14 @@
 name: ncae-lab
 
+x-topology-env: &topology-env
+  TEAM: "1"
+  NCAE_LAN: "192.168.1.0/24"
+  NCAE_LAN_BASE: "192.168.1"
+  NCAE_SCORING: "172.18.0.0/16"
+  NCAE_SHELL_IP: "172.18.14.1"
+  NCAE_BACKUP_IP: "192.168.1.15"
+  NCAE_CA_IP: "172.18.0.38"
+
 x-common: &common
   privileged: true
   stdin_open: true
@@ -13,6 +22,7 @@ x-common: &common
     - ./logs:/vagrant/logs
     - /sys/fs/cgroup:/sys/fs/cgroup:ro
   environment:
+    <<: *topology-env
     NCAE_AUTO_ACCEPT: "1"
     NCAE_SKIP_BACKUP: "1"
     NCAE_SKIP_SCRIPT_LOCK: "1"
@@ -53,6 +63,7 @@ services:
     container_name: ncae-shell
     command: ["/sbin/init"]
     environment:
+      <<: *topology-env
       NCAE_AUTO_ACCEPT: "1"
       NCAE_SKIP_BACKUP: "1"
       NCAE_SKIP_SCRIPT_LOCK: "1"
@@ -72,6 +83,7 @@ services:
     container_name: ncae-www
     command: ["/sbin/init"]
     environment:
+      <<: *topology-env
       NCAE_AUTO_ACCEPT: "1"
       NCAE_SKIP_BACKUP: "1"
       NCAE_SKIP_SCRIPT_LOCK: "1"
@@ -90,6 +102,7 @@ services:
     container_name: ncae-db
     command: ["/sbin/init"]
     environment:
+      <<: *topology-env
       NCAE_AUTO_ACCEPT: "1"
       NCAE_SKIP_BACKUP: "1"
       NCAE_SKIP_SCRIPT_LOCK: "1"
@@ -109,6 +122,7 @@ services:
     container_name: ncae-dns
     command: ["/sbin/init"]
     environment:
+      <<: *topology-env
       NCAE_AUTO_ACCEPT: "1"
       NCAE_SKIP_BACKUP: "1"
       NCAE_SKIP_SCRIPT_LOCK: "1"
@@ -127,6 +141,7 @@ services:
     container_name: ncae-backup
     command: ["/sbin/init"]
     environment:
+      <<: *topology-env
       NCAE_AUTO_ACCEPT: "1"
       NCAE_SKIP_BACKUP: "1"
       NCAE_SKIP_SCRIPT_LOCK: "1"

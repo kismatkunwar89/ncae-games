@@ -5,11 +5,27 @@
 # Simulates what the scoring engine checks. No logging, stdout only.
 # Usage: bash score_check.sh
 # =============================================================================
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || \
-       ip addr show | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "?")
+MY_IPS=$(ip addr show | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
+TEAM="${TEAM:-}"
+if [[ -z "$TEAM" && -n "${NCAE_LAN_BASE:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN_BASE}" | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" && -n "${NCAE_LAN:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//' | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+TEAM="${TEAM:-1}"
 # Network topology — inherited from deploy_all.sh or computed here for standalone runs
 NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
+NCAE_CA_IP="${NCAE_CA_IP:-172.18.0.38}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YEL='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}[✔] $1${NC}"; }
@@ -36,7 +52,7 @@ if curl -skI --max-time 5 "https://${MY_IP}/" 2>/dev/null | grep -q "HTTP/"; the
     if echo "$CERT_ISSUER" | grep -qi "ncae\|ca\.ncae\|cybergames"; then
         ok "  Cert appears CA-signed: $CERT_ISSUER"
     else
-        warn "  Cert may be self-signed — replace with CA cert from 172.18.0.38"
+        warn "  Cert may be self-signed — replace with CA cert from ${NCAE_CA_IP}"
         warn "  Issuer: $CERT_ISSUER"
     fi
 else
@@ -86,13 +102,12 @@ fi
 
 # -- SMB (500pts login + 1000 write + 1000 read) -------------------------------
 if command -v smbclient &>/dev/null; then
-    SHELL_IP="172.18.14.${TEAM}"
     SMB_PASS=$(grep "SCORING SMB/SSH password:" /root/ncae_credentials_shell.txt 2>/dev/null | awk '{print $NF}')
     if [[ -n "$SMB_PASS" ]]; then
-        if smbclient -L "${SHELL_IP}" -U "scoring%${SMB_PASS}" --timeout=5 &>/dev/null; then
-            ok "SMB login works on ${SHELL_IP} (500pts)"
+        if smbclient -L "${NCAE_SHELL_IP}" -U "scoring%${SMB_PASS}" --timeout=5 &>/dev/null; then
+            ok "SMB login works on ${NCAE_SHELL_IP} (500pts)"
         else
-            fail "SMB login FAILED on ${SHELL_IP} (500pts AT RISK)"
+            fail "SMB login FAILED on ${NCAE_SHELL_IP} (500pts AT RISK)"
         fi
     else
         warn "No SMB creds in /root/ncae_credentials_shell.txt — skipping SMB check"
@@ -100,12 +115,11 @@ if command -v smbclient &>/dev/null; then
 fi
 
 # -- SSH (1000pts on shell VM) -------------------------------------------------
-SHELL_IP="172.18.14.${TEAM}"
 if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-    "scoring@${SHELL_IP}" exit 2>/dev/null; then
-    ok "SSH scoring@${SHELL_IP} key auth works (1000pts)"
+    "scoring@${NCAE_SHELL_IP}" exit 2>/dev/null; then
+    ok "SSH scoring@${NCAE_SHELL_IP} key auth works (1000pts)"
 else
-    warn "SSH key auth to scoring@${SHELL_IP} failed or no key configured"
+    warn "SSH key auth to scoring@${NCAE_SHELL_IP} failed or no key configured"
 fi
 
 # -- Services running ----------------------------------------------------------

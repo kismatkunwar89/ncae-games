@@ -3,7 +3,7 @@
 # NCAE Cyber Games 2026 - backup_configs.sh (FIXED v2)
 #
 # PURPOSE: Snapshot all scored service configs to both local disk and the
-#          backup VM (192.168.t.15) every 5 minutes. If red team trashes a
+#          backup VM (${NCAE_LAN_BASE}.15 by default) every 5 minutes. If red team trashes a
 #          config, you restore from here instead of rebuilding from scratch.
 #
 # SENSITIVE FILE HANDLING:
@@ -23,16 +23,30 @@ mkdir -p /vagrant/logs
 touch "$LOGFILE" && chmod 600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
-# Auto-detect team number from our IP (192.168.t.x -> t)
-# Fall back to team 1 if detection fails
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "1")
+MY_IPS=$(ip addr show | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
+TEAM="${TEAM:-}"
+if [[ -z "$TEAM" && -n "${NCAE_LAN_BASE:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN_BASE}" | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" && -n "${NCAE_LAN:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//' | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+TEAM="${TEAM:-1}"
 HOSTNAME_SHORT=$(hostname | tr '.' '_')
 LOCAL_BACKUP="/root/ncae_config_backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-# Allow overriding backup VM IP as first argument; default to 192.168.t.15
-# Uses NCAE_LAN_BASE if set (inherited from deploy_all.sh) for topology flexibility
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+# Allow overriding backup VM IP as first argument; default to ${NCAE_LAN_BASE}.15
+# Uses NCAE_LAN_BASE / NCAE_BACKUP_IP if set for topology flexibility
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-192.168.${TEAM}}"
-BACKUP_VM_IP="${1:-${NCAE_LAN_BASE}.15}"
+BACKUP_VM_IP="${1:-${NCAE_BACKUP_IP:-${NCAE_LAN_BASE}.15}}"
 
 echo "[$(date)] === Config Backup START - $HOSTNAME_SHORT ==="
 mkdir -p "$LOCAL_BACKUP"
@@ -159,7 +173,7 @@ install_cron() {
         local script_path
         script_path=$(realpath "$0")
         cat > /etc/cron.d/ncae_config_backup <<EOF
-*/5 * * * * root bash ${script_path} ${BACKUP_VM_IP} >> /var/log/ncae_backup.log 2>&1
+*/5 * * * * root TEAM=${TEAM} NCAE_LAN=${NCAE_LAN} NCAE_LAN_BASE=${NCAE_LAN_BASE} NCAE_SCORING=${NCAE_SCORING} NCAE_BACKUP_IP=${BACKUP_VM_IP} bash ${script_path} ${BACKUP_VM_IP} >> /var/log/ncae_backup.log 2>&1
 EOF
         echo "[+] Cron installed: every 5 min"
     fi

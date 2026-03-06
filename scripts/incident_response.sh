@@ -15,11 +15,43 @@ exec > >(tee -a "$LOGFILE") 2>&1
 echo "[$(date)] === Incident Response START ==="
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
-TEAM=$(ip addr show | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 2>/dev/null || echo "1")
-# Known safe IPs - scoring engine range and internal LAN
-# These subnets contain the scoring engine, internal VMs, and loopback
-# Blocking any IP in these ranges risks killing scored services
-SAFE_SUBNETS=("172.18." "192.168." "127.0.")
+MY_IPS=$(ip addr show | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
+TEAM="${TEAM:-}"
+if [[ -z "$TEAM" && -n "${NCAE_LAN_BASE:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN_BASE}" | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" && -n "${NCAE_LAN:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//' | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+TEAM="${TEAM:-1}"
+
+NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+
+cidr_prefix() {
+    local cidr="$1" net mask o1 o2 o3 o4
+    net="${cidr%/*}"
+    mask="${cidr#*/}"
+    IFS=. read -r o1 o2 o3 o4 <<< "$net"
+    case "$mask" in
+        8)  echo "${o1}." ;;
+        16) echo "${o1}.${o2}." ;;
+        24) echo "${o1}.${o2}.${o3}." ;;
+        32) echo "${o1}.${o2}.${o3}.${o4}" ;;
+        *)  echo "$net" ;;
+    esac
+}
+
+# Known safe IPs - scoring engine range, internal LAN, and loopback.
+# Blocking any IP in these ranges risks killing scored services.
+SAFE_SUBNETS=("$(cidr_prefix "${NCAE_SCORING}")" "$(cidr_prefix "${NCAE_LAN}")" "127.")
 
 banner() {
     echo ""
@@ -48,7 +80,7 @@ kill_suspicious_connections() {
     # FIXED: Guard against blocking scoring engine or internal IPs
     if is_safe_ip "$BAD_IP"; then
         echo ""
-        echo "  [!!] WARNING: $BAD_IP is in a safe/scoring subnet (172.18.x or 192.168.x)"
+        echo "  [!!] WARNING: $BAD_IP is in a protected subnet (${NCAE_SCORING} or ${NCAE_LAN})"
         echo "       Blocking this IP may KILL SCORING and cost you points."
         echo ""
         read -rp "  Type OVERRIDE to block anyway, or anything else to cancel: " OVERRIDE
