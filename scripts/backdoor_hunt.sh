@@ -390,6 +390,83 @@ find /usr/bin /usr/sbin /bin /sbin -type f -newer /etc/hostname 2>/dev/null \
       flag "Modified system binary: $f  ($(stat -c 'mtime: %y size: %s' "$f"))"
     done
 
+# ── 16. USER-LEVEL PERMISSIONS AUDIT ─────────────────────────────────────────
+head "USER-LEVEL PERMISSIONS AUDIT"
+
+echo "[*] SGID binaries (group escalation — often missed):"
+while IFS= read -r -d '' f; do
+    warn "SGID binary: $f  ($(stat -c '%U %G %a' "$f"))"
+done < <(find / -xdev -type f -perm /2000 -print0 2>/dev/null)
+
+echo "[*] Critical file permissions:"
+declare -A EXPECTED_PERMS=(
+    ["/etc/passwd"]="644"
+    ["/etc/shadow"]="640"
+    ["/etc/group"]="644"
+    ["/etc/gshadow"]="640"
+    ["/etc/sudoers"]="440"
+    ["/etc/ssh/sshd_config"]="600"
+    ["/etc/crontab"]="644"
+)
+for f in "${!EXPECTED_PERMS[@]}"; do
+    [[ ! -f "$f" ]] && continue
+    actual=$(stat -c '%a' "$f" 2>/dev/null)
+    owner=$(stat -c '%U:%G' "$f" 2>/dev/null)
+    expected="${EXPECTED_PERMS[$f]}"
+    if [[ "$actual" != "$expected" ]]; then
+        flag "$f permissions are $actual (expected $expected) owner=$owner"
+    fi
+    # All critical files must be owned by root
+    if [[ "$owner" != "root:root" && "$owner" != "root:shadow" && "$owner" != "root:sudo" ]]; then
+        flag "$f has unexpected owner: $owner"
+    fi
+done
+
+echo "[*] Dangerous group memberships (docker/disk/lxd/shadow/adm = near-root access):"
+DANGEROUS_GROUPS=("docker" "disk" "lxd" "lxc" "shadow" "adm" "kvm" "libvirt")
+for grp in "${DANGEROUS_GROUPS[@]}"; do
+    members=$(getent group "$grp" 2>/dev/null | cut -d: -f4)
+    if [[ -n "$members" ]]; then
+        flag "Group '$grp' has members: $members"
+    fi
+done
+
+echo "[*] Home directory permissions (should be 700 — 755 lets others read files):"
+while IFS=: read -r user _ uid _ _ homedir _; do
+    [[ $uid -lt 1000 || -z "$homedir" || ! -d "$homedir" ]] && continue
+    perms=$(stat -c '%a' "$homedir" 2>/dev/null)
+    if [[ "$perms" != "700" && "$perms" != "750" ]]; then
+        flag "Home dir $homedir is $perms (user=$user) — other users may read files"
+    fi
+done < /etc/passwd
+
+echo "[*] ACLs on sensitive paths (getfacl reveals permissions invisible to ls):"
+if command -v getfacl &>/dev/null; then
+    for path in /etc/passwd /etc/shadow /etc/sudoers /root /home; do
+        acl=$(getfacl -p "$path" 2>/dev/null | grep -v '^#\|^user::\|^group::\|^other::\|^mask::' | grep -v '^$' || true)
+        if [[ -n "$acl" ]]; then
+            flag "ACL found on $path: $acl"
+        fi
+    done
+else
+    warn "getfacl not available (install acl package)"
+fi
+
+echo "[*] World-writable files outside /tmp (anyone can modify these):"
+find /etc /var /srv /opt /home /root -type f -perm -0002 2>/dev/null \
+  | grep -v '/proc\|/sys' \
+  | while read -r f; do
+      flag "World-writable file: $f  ($(stat -c '%U %G %a' "$f"))"
+    done
+
+echo "[*] Writable directories in root PATH (command hijacking risk):"
+echo "$PATH" | tr ':' '\n' | while read -r dir; do
+    [[ -z "$dir" ]] && continue
+    if [[ -w "$dir" ]] && [[ "$(stat -c '%U' "$dir" 2>/dev/null)" != "root" ]]; then
+        flag "Writable non-root dir in PATH: $dir"
+    fi
+done
+
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 echo ""
 echo "======================================================"
