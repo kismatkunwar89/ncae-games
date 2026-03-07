@@ -49,22 +49,11 @@ touch "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 echo "# NCAE Shell/SMB Credentials - $(date)" >> "$CRED_FILE"
 
-# -- Scoring password: prompt or env var --------------------------------------
-# Set NCAE_SCORING_PASS env var before running to skip prompt, e.g.:
-#   NCAE_SCORING_PASS='CompPassword123!' sudo bash harden_shell_smb.sh
-if [[ -z "${NCAE_SCORING_PASS:-}" ]]; then
-    echo ""
-    echo "[!] Enter the scoring engine SMB/SSH password from the competition platform."
-    echo "    (Check the scoreboard or inject at 10:30 AM for exact credentials)"
-    echo "    Leave blank to generate a CISA-compliant random password:"
-    read -rsp "    Scoring password: " NCAE_SCORING_PASS
-    echo ""
-fi
-if [[ -z "$NCAE_SCORING_PASS" ]]; then
-    NCAE_SCORING_PASS=$(gen_pass 16)
-    echo "[*] Generated scoring password (update if competition provides one)"
-fi
-echo "SCORING SMB/SSH password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
+# -- Scoring password policy ---------------------------------------------------
+# SAFETY: Do not change the scoring password unless explicitly provided or we
+# are creating the scoring user from scratch for a smoke test environment.
+SCORING_PASS_KNOWN=0
+[[ -n "${NCAE_SCORING_PASS:-}" ]] && SCORING_PASS_KNOWN=1
 
 # -- 1. Update -----------------------------------------------------------------
 if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
@@ -122,10 +111,23 @@ fi
 
 # -- 4. Create scoring user ----------------------------------------------------
 echo "[*] Setting up scoring user..."
+SCORING_CREATED=0
 if ! id scoring &>/dev/null; then
     useradd -m -s /bin/bash scoring
+    SCORING_CREATED=1
 fi
-echo "scoring:$NCAE_SCORING_PASS" | chpasswd
+if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
+    echo "scoring:$NCAE_SCORING_PASS" | chpasswd
+    echo "SCORING SMB/SSH password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
+elif [[ "$SCORING_CREATED" -eq 1 ]]; then
+    NCAE_SCORING_PASS=$(gen_pass 16)
+    SCORING_PASS_KNOWN=1
+    echo "scoring:$NCAE_SCORING_PASS" | chpasswd
+    echo "[*] Created scoring user with generated temporary password"
+    echo "SCORING SMB/SSH temporary password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
+else
+    echo "[*] Preserving existing scoring password (no NCAE_SCORING_PASS provided)"
+fi
 
 # SSH key setup for scoring
 SSH_DIR="/home/scoring/.ssh"
@@ -212,8 +214,13 @@ chmod 755 "$SMB_READ_DIR"
 # smbpasswd -a adds the user to Samba's password database (separate from /etc/shadow)
 # -s reads password from stdin (non-interactive), two copies = password + confirmation
 # Samba uses its own TDB password database, NOT the system /etc/shadow
-echo -e "${NCAE_SCORING_PASS}\n${NCAE_SCORING_PASS}" | smbpasswd -s -a scoring 2>/dev/null || true
-smbpasswd -e scoring 2>/dev/null || true  # -e enables the account (it may be disabled by default)
+if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
+    echo -e "${NCAE_SCORING_PASS}\n${NCAE_SCORING_PASS}" | smbpasswd -s -a scoring 2>/dev/null || true
+    smbpasswd -e scoring 2>/dev/null || true  # -e enables the account (it may be disabled by default)
+else
+    echo "[!] SMB password preserved/unknown - add scoring to Samba manually when the correct password is known:"
+    echo "    smbpasswd -a scoring && smbpasswd -e scoring"
+fi
 
 # -- 8. smb.conf --------------------------------------------------------------
 # SMBv2+ only (server min protocol = SMB2): disables SMBv1 which has known
@@ -401,10 +408,17 @@ echo ""
 echo "SCORING CHECKLIST (3500pts):"
 echo "  SSH Login  (1000): Add scoring pubkey to $AUTH_KEYS"
 echo "    -> Then run: /root/ncae_lock_ssh.sh"
-echo "  SMB Login  (500):  smbclient -L //${NCAE_SHELL_IP}/ -U scoring%\$(grep SCORING $CRED_FILE | awk '{print \$NF}')"
-echo "  SMB Write  (1000): smbclient //${NCAE_SHELL_IP}/write -U scoring%'<pass>' -c 'put /etc/hostname test.txt'"
-echo "  SMB Read   (1000): smbclient //${NCAE_SHELL_IP}/read  -U scoring%'<pass>' -c 'get readme.txt /tmp/readme.txt'"
-echo "  (Password in $CRED_FILE)"
+if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
+    echo "  SMB Login  (500):  smbclient -L //${NCAE_SHELL_IP}/ -U scoring%\$(grep SCORING $CRED_FILE | awk '{print \$NF}')"
+    echo "  SMB Write  (1000): smbclient //${NCAE_SHELL_IP}/write -U scoring%'<pass>' -c 'put /etc/hostname test.txt'"
+    echo "  SMB Read   (1000): smbclient //${NCAE_SHELL_IP}/read  -U scoring%'<pass>' -c 'get readme.txt /tmp/readme.txt'"
+    echo "  (Password in $CRED_FILE)"
+else
+    echo "  SMB Login  (500):  set/confirm the competition scoring password, then: smbpasswd -a scoring"
+    echo "  SMB Write  (1000): after password is known, test //${NCAE_SHELL_IP}/write"
+    echo "  SMB Read   (1000): after password is known, test //${NCAE_SHELL_IP}/read"
+    echo "  (Password preserved/not recorded here; use competition-provided credential)"
+fi
 echo ""
 echo "  [!!] CHECK SCOREBOARD AT 10:30 AM for exact share names expected by scoring engine"
 echo "       If wrong, edit /etc/samba/smb.conf share names and: systemctl restart smb"
