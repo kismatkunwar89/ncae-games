@@ -56,11 +56,15 @@ SCORING_PASS_KNOWN=0
 [[ -n "${NCAE_SCORING_PASS:-}" ]] && SCORING_PASS_KNOWN=1
 
 # -- 1. Update -----------------------------------------------------------------
-if [[ "${NCAE_SKIP_UPDATE:-0}" == "1" ]]; then
-    echo "[*] Skipping package update (NCAE_SKIP_UPDATE=1)"
-else
-    echo "[*] Updating packages..."
+# SAFETY: In a live competition, blanket package upgrades can disrupt scoring
+# services or change configs unexpectedly. Default to no full-system update
+# unless the operator explicitly opts in.
+if [[ "${NCAE_DO_UPDATE:-0}" == "1" ]]; then
+    echo "[*] Updating packages (NCAE_DO_UPDATE=1)..."
     dnf update -y
+else
+    echo "[*] Skipping package update by default"
+    echo "    Set NCAE_DO_UPDATE=1 to perform a full dnf update"
 fi
 
 # -- 2. Install packages -------------------------------------------------------
