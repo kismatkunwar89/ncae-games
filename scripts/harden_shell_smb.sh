@@ -6,12 +6,14 @@
 #           => 3500pts total
 #
 # FIXES:
-#   - Scoring password NOT hardcoded - prompted interactively or set via env var
+#   - Scoring password preserved unless explicitly provided
+#   - Full package update skipped by default
+#   - Operator account preserved automatically
 #   - SSH password auth stays enabled until scoring key confirmed, then locked
+#   - Firewall moved to separate script once topology is confirmed
 #   - nmb made optional (may not exist on Rocky 9 minimal)
 #   - Share names flagged as TBD - check scoreboard at 10:30 AM
 #   - CISA 14+ char passwords for all local users
-#   - jailed users for common accounts
 #   - Disk quota guard against write-fill DoS
 # Run as root. Re-run safe.
 # =============================================================================
@@ -26,6 +28,8 @@ echo "[$(date)] === Shell/SMB Hardening START ==="
 PRIMARY_IF="${PRIMARY_IF:-$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')}"
 PRIMARY_CIDR="${PRIMARY_CIDR:-$(ip -o -4 addr show dev "${PRIMARY_IF}" scope global 2>/dev/null | awk '{print $4}' | head -1)}"
 PRIMARY_IP="${PRIMARY_IP:-${PRIMARY_CIDR%/*}}"
+PRIMARY_NET="${PRIMARY_NET:-$(ip route show dev "${PRIMARY_IF}" 2>/dev/null | awk '/proto kernel/ {print $1; exit}')}"
+[[ -z "$PRIMARY_NET" ]] && PRIMARY_NET="$PRIMARY_CIDR"
 
 TEAM="${TEAM:-$(ip addr show | grep -oP '172\.18\.14\.\K[0-9]+' | head -1 2>/dev/null || \
                 ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")}"
@@ -40,15 +44,39 @@ if [[ -z "${NCAE_LAN:-}" || -z "${NCAE_SCORING:-}" || -z "${NCAE_SHELL_IP:-}" ]]
         NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
         NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
     else
-        NCAE_LAN="${NCAE_LAN:-$PRIMARY_CIDR}"
-        NCAE_SCORING="${NCAE_SCORING:-$PRIMARY_CIDR}"
+        NCAE_LAN="${NCAE_LAN:-$PRIMARY_NET}"
+        NCAE_SCORING="${NCAE_SCORING:-$PRIMARY_NET}"
         NCAE_SHELL_IP="${NCAE_SHELL_IP:-$PRIMARY_IP}"
-        echo "[*] Non-competition subnet detected; using active management network ${PRIMARY_CIDR}"
+        echo "[*] Non-competition subnet detected; using active management network ${PRIMARY_NET}"
     fi
 fi
 
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
 echo "[*] Team: $TEAM  LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
+
+detect_operator_user() {
+    local user=""
+    if [[ -n "${NCAE_OPERATOR:-}" && "${NCAE_OPERATOR}" != "root" ]]; then
+        echo "$NCAE_OPERATOR"
+        return
+    fi
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        echo "$SUDO_USER"
+        return
+    fi
+    user=$(logname 2>/dev/null || true)
+    if [[ -n "$user" && "$user" != "root" ]]; then
+        echo "$user"
+        return
+    fi
+    user=$(who 2>/dev/null | awk '$1 != "root" {print $1; exit}')
+    if [[ -n "$user" && "$user" != "root" ]]; then
+        echo "$user"
+        return
+    fi
+}
+
+OPERATOR_USER="$(detect_operator_user)"
 
 # -- Password generator (CISA: 14+ chars, 4 complexity classes) ---------------
 gen_pass() {
@@ -101,7 +129,10 @@ fi
 echo "[*] Locking user accounts with CISA-compliant passwords..."
 KEEP_USERS=("root" "rocky" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
-[[ -n "${NCAE_OPERATOR:-}" ]] && KEEP_USERS+=("$NCAE_OPERATOR") && echo "[*] Preserving operator: $NCAE_OPERATOR"
+if [[ -n "$OPERATOR_USER" ]]; then
+    KEEP_USERS+=("$OPERATOR_USER")
+    echo "[*] Preserving operator: $OPERATOR_USER"
+fi
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)
     if [[ $uid -ge 1000 ]] && [[ ! " ${KEEP_USERS[*]} " == *" $user "* ]]; then
@@ -186,9 +217,9 @@ AllowAgentForwarding no
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
-AllowUsers scoring@${NCAE_SCORING} root@${NCAE_LAN} *@127.0.0.1
-# scoring: only from external LAN 172.18.0.0/16 (scoring engine + jumphost)
-# root: only from internal LAN 192.168.t.0/24 (jump from another of our VMs)
+# NOTE: Do not restrict SSH by source subnet here.
+# Apply network policy separately with firewall_shell_smb.sh after the real
+# admin/scoring paths are confirmed for the event environment.
 EOF
 
 # Script to disable password auth AFTER confirming key works
@@ -317,25 +348,9 @@ semanage fcontext -a -t samba_share_t "${SMB_READ_DIR}(/.*)?" 2>/dev/null || tru
 restorecon -Rv "$SMB_WRITE_DIR" "$SMB_READ_DIR" 2>/dev/null || true
 
 # -- 11. Firewall --------------------------------------------------------------
-echo "[*] Configuring firewalld (restricted - SSH + SMB from ${NCAE_SCORING} only)..."
-systemctl enable firewalld 2>/dev/null || true
-systemctl start firewalld 2>/dev/null || true
-firewall-cmd --permanent --set-default-zone=drop 2>/dev/null || true
-firewall-cmd --permanent --new-zone=ncae-shell 2>/dev/null || true
-firewall-cmd --permanent --zone=ncae-shell --set-target=DROP 2>/dev/null || true
-# SSH from external LAN (scoring + jumphost) and internal LAN
-firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' service name='ssh' accept" 2>/dev/null || true
-firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='${NCAE_LAN}' service name='ssh' accept" 2>/dev/null || true
-# SMB from external LAN (scoring)
-firewall-cmd --permanent --zone=ncae-shell \
-    --add-rich-rule="rule family='ipv4' source address='${NCAE_SCORING}' service name='samba' accept" 2>/dev/null || true
-NIC=$(ip route | grep default | awk '{print $5}' | head -1)
-[[ -z "$NIC" ]] && NIC=$(ip link show | grep -v 'lo\|LOOPBACK' | awk -F: 'NR==1{print $2}' | tr -d ' ')
-[[ -z "$NIC" ]] && NIC="eth0"
-firewall-cmd --permanent --zone=ncae-shell --add-interface="$NIC" 2>/dev/null || true
-firewall-cmd --reload 2>/dev/null || true
+echo "[*] Skipping firewall changes in host hardening by design"
+echo "    Run: bash firewall_shell_smb.sh"
+echo "    only after confirming the real admin and scoring network paths."
 
 # -- 12. Fail2Ban --------------------------------------------------------------
 echo "[*] Installing Fail2Ban..."
@@ -430,6 +445,7 @@ echo ""
 echo "SCORING CHECKLIST (3500pts):"
 echo "  SSH Login  (1000): Add scoring pubkey to $AUTH_KEYS"
 echo "    -> Then run: /root/ncae_lock_ssh.sh"
+echo "  Firewall   (later): run firewall_shell_smb.sh after confirming admin/scoring subnets"
 if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
     echo "  SMB Login  (500):  smbclient -L //${NCAE_SHELL_IP}/ -U scoring%\$(grep SCORING $CRED_FILE | awk '{print \$NF}')"
     echo "  SMB Write  (1000): smbclient //${NCAE_SHELL_IP}/write -U scoring%'<pass>' -c 'put /etc/hostname test.txt'"
