@@ -23,13 +23,31 @@ echo "[$(date)] === Shell/SMB Hardening START ==="
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
+PRIMARY_IF="${PRIMARY_IF:-$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')}"
+PRIMARY_CIDR="${PRIMARY_CIDR:-$(ip -o -4 addr show dev "${PRIMARY_IF}" scope global 2>/dev/null | awk '{print $4}' | head -1)}"
+PRIMARY_IP="${PRIMARY_IP:-${PRIMARY_CIDR%/*}}"
+
 TEAM="${TEAM:-$(ip addr show | grep -oP '172\.18\.14\.\K[0-9]+' | head -1 2>/dev/null || \
                 ip addr show | grep -oP '192\.168\.\K[0-9]+' | head -1 2>/dev/null || echo "1")}"
-# Network topology — inherited from deploy_all.sh or computed here for standalone runs
-NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
-NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+
+# Network topology — inherited from deploy_all.sh or computed here for standalone runs.
+# If we are not clearly on the expected competition ranges, fall back to the
+# currently connected management subnet so we do not lock ourselves out.
+if [[ -z "${NCAE_LAN:-}" || -z "${NCAE_SCORING:-}" || -z "${NCAE_SHELL_IP:-}" ]]; then
+    if [[ "$PRIMARY_IP" =~ ^172\.18\.14\.([0-9]+)$ ]]; then
+        TEAM="${TEAM:-${BASH_REMATCH[1]}}"
+        NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+        NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+        NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
+    else
+        NCAE_LAN="${NCAE_LAN:-$PRIMARY_CIDR}"
+        NCAE_SCORING="${NCAE_SCORING:-$PRIMARY_CIDR}"
+        NCAE_SHELL_IP="${NCAE_SHELL_IP:-$PRIMARY_IP}"
+        echo "[*] Non-competition subnet detected; using active management network ${PRIMARY_CIDR}"
+    fi
+fi
+
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
-NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
 echo "[*] Team: $TEAM  LAN: ${NCAE_LAN}  Scoring: ${NCAE_SCORING}"
 
 # -- Password generator (CISA: 14+ chars, 4 complexity classes) ---------------
