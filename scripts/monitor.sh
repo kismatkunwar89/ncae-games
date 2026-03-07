@@ -36,10 +36,10 @@ LOOP_COUNT=1
 
 detect_services() {
     local raw=()
-    for svc in apache2 nginx httpd named bind9 postgresql mysql mariadb smb samba ssh sshd; do
+    for svc in apache2 nginx httpd named bind9 postgresql mysql mariadb vsftpd proftpd ssh sshd; do
         systemctl is-active --quiet "$svc" 2>/dev/null && raw+=("$svc")
     done
-    # Dedup: some systems run both ssh and sshd, or both smb and samba
+    # Dedup: some systems run both ssh and sshd, or expose multiple service aliases
     # We only want one entry per logical service to avoid duplicate restart attempts
     local seen=()
     for svc in "${raw[@]}"; do
@@ -253,7 +253,7 @@ check_connections() {
     # shellcheck disable=SC2009  # ps|grep used intentionally for pattern matching
     revshells=$(ps aux 2>/dev/null | \
         grep -E '\bnc\b|\bncat\b|\bsocat\b|\bbash -i\b|\bsh -i\b|\bpython[0-9]? -c\b|\bperl -e\b' | \
-        grep -v grep | grep -v 'ncae_smb_quota' | grep -v 'ncae_monitor' )
+        grep -v grep | grep -v 'ncae_ftp_quota' | grep -v 'ncae_monitor' )
     if [[ -n "$revshells" ]]; then
         alert "POSSIBLE REVERSE SHELL:\n$revshells"
     fi
@@ -710,10 +710,10 @@ check_disk() {
         alert "DISK ${usage}% - red team may be filling disk"
         # Only auto-clean /tmp - do NOT auto-delete from /srv/ncae* (backup data)
         # Safe auto-clean: only delete old files from /tmp (nothing scored lives there)
-        # We explicitly do NOT auto-delete from /srv/samba or /srv/ncae_backups
+        # We explicitly do NOT auto-delete from /srv/ftp or /srv/ncae_backups
         # because those contain scored data - auto-deletion would lose competition points
         find /tmp -type f -mmin +30 -delete 2>/dev/null || true
-        alert "DISK CLEANUP: deleted old /tmp files. Check /srv/samba manually if still full."
+        alert "DISK CLEANUP: deleted old /tmp files. Check /srv/ftp manually if still full."
     fi
 }
 
@@ -754,14 +754,14 @@ check_scoring() {
             alert "POSTGRES NOT READY"
         fi
     fi
-    if systemctl is-active --quiet smb 2>/dev/null; then
-        SMB_PASS=$(grep "SCORING SMB/SSH password:" /root/ncae_credentials_shell.txt 2>/dev/null | awk '{print $NF}')
-        if [[ -n "$SMB_PASS" ]]; then
-            if smbclient -L localhost -U "scoring%${SMB_PASS}" --timeout=3 &>/dev/null; then
-                status_line+=" SMB:✔"
+    if systemctl is-active --quiet vsftpd 2>/dev/null || systemctl is-active --quiet proftpd 2>/dev/null; then
+        FTP_PASS=$(grep -E "SCORING FTP/SSH (temporary )?password:" /root/ncae_credentials_shell.txt 2>/dev/null | awk '{print $NF}' | tail -1)
+        if [[ -n "$FTP_PASS" ]]; then
+            if curl --silent --show-error --fail --max-time 3 --user "scoring:${FTP_PASS}" ftp://127.0.0.1/readme.txt >/dev/null 2>&1; then
+                status_line+=" FTP:✔"
             else
-                status_line+=" SMB:✘"
-                alert "SMB NOT RESPONDING"
+                status_line+=" FTP:✘"
+                alert "FTP NOT RESPONDING"
             fi
         fi
     fi
@@ -772,7 +772,7 @@ check_scoring() {
 # -- status_snapshot (FIXED: shows DOWN not just UP) --------------------------
 status_snapshot() {
     echo "--- STATUS @ $(date '+%H:%M:%S') ---"
-    for svc in apache2 nginx named bind9 postgresql smb samba ssh sshd; do
+    for svc in apache2 nginx named bind9 postgresql vsftpd proftpd ssh sshd; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             echo "  [UP]   $svc"
         elif systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then

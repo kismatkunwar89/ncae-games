@@ -100,24 +100,30 @@ else
     warn "pg_isready not available — skipping DB check"
 fi
 
-# -- SMB (500pts login + 1000 write + 1000 read) -------------------------------
-if command -v smbclient &>/dev/null; then
-    SMB_PASS=$(grep "SCORING SMB/SSH password:" /root/ncae_credentials_shell.txt 2>/dev/null | awk '{print $NF}')
-    if [[ -n "$SMB_PASS" ]]; then
-        if smbclient -L "${NCAE_SHELL_IP}" -U "scoring%${SMB_PASS}" --timeout=5 &>/dev/null; then
-            ok "SMB login works on ${NCAE_SHELL_IP} (500pts)"
+# -- FTP (1500 content + 500 write) --------------------------------------------
+if command -v curl &>/dev/null; then
+    FTP_PASS=$(grep -E "SCORING FTP/SSH (temporary )?password:" /root/ncae_credentials_shell.txt 2>/dev/null | awk '{print $NF}' | tail -1)
+    if [[ -n "$FTP_PASS" ]]; then
+        if curl --silent --show-error --fail --max-time 5 --user "scoring:${FTP_PASS}" "ftp://${NCAE_SHELL_IP}/readme.txt" >/dev/null 2>&1; then
+            ok "FTP content works on ${NCAE_SHELL_IP} (1500pts)"
         else
-            fail "SMB login FAILED on ${NCAE_SHELL_IP} (500pts AT RISK)"
+            fail "FTP content FAILED on ${NCAE_SHELL_IP} (1500pts AT RISK)"
+        fi
+        if curl --silent --show-error --fail --max-time 5 -T /etc/hostname --user "scoring:${FTP_PASS}" \
+            "ftp://${NCAE_SHELL_IP}/upload/score_check_$(hostname).txt" >/dev/null 2>&1; then
+            ok "FTP write works on ${NCAE_SHELL_IP} (500pts)"
+        else
+            fail "FTP write FAILED on ${NCAE_SHELL_IP} (500pts AT RISK)"
         fi
     else
-        warn "No SMB creds in /root/ncae_credentials_shell.txt — skipping SMB check"
+        warn "No FTP creds in /root/ncae_credentials_shell.txt — skipping FTP checks"
     fi
 fi
 
-# -- SSH (1000pts on shell VM) -------------------------------------------------
+# -- SSH (500pts on shell VM) --------------------------------------------------
 if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
     "scoring@${NCAE_SHELL_IP}" exit 2>/dev/null; then
-    ok "SSH scoring@${NCAE_SHELL_IP} key auth works (1000pts)"
+    ok "SSH scoring@${NCAE_SHELL_IP} key auth works (500pts)"
 else
     warn "SSH key auth to scoring@${NCAE_SHELL_IP} failed or no key configured"
 fi
@@ -125,7 +131,7 @@ fi
 # -- Services running ----------------------------------------------------------
 echo ""
 echo "[ LOCAL SERVICES ]"
-for svc in apache2 nginx named bind9 postgresql smb samba ssh sshd; do
+for svc in apache2 nginx named bind9 postgresql vsftpd proftpd ssh sshd; do
     systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service" || continue
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         ok "$svc running"

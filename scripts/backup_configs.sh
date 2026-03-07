@@ -106,8 +106,10 @@ collect_configs() {
     if [[ -d /var/named ]]; then cp -r /var/named/ "$dest/var_named/" 2>/dev/null; fi
     if [[ -d /etc/bind ]]; then cp -r /etc/bind/ "$dest/bind/" 2>/dev/null; fi
 
-    # Samba config
-    if [[ -f /etc/samba/smb.conf ]]; then cp /etc/samba/smb.conf "$dest/" 2>/dev/null; fi
+    # FTP config/content for shell role
+    if [[ -f /etc/vsftpd/vsftpd.conf ]]; then cp /etc/vsftpd/vsftpd.conf "$dest/" 2>/dev/null; fi
+    if [[ -f /etc/vsftpd/user_list ]]; then cp /etc/vsftpd/user_list "$dest/" 2>/dev/null; fi
+    if [[ -d /srv/ftp/scoring ]]; then cp -r /srv/ftp/scoring "$dest/ftp_scoring/" 2>/dev/null; fi
 
     # PostgreSQL - glob expands to whichever version is installed (14, 15, 16...)
     for pgconf in /etc/postgresql/*/main/postgresql.conf \
@@ -262,6 +264,7 @@ echo "  Local:  $BACKUP_PATH"
 echo "  Remote: $BACKUP_VM_IP:/srv/ncae_backups/${HOSTNAME_SHORT}/${TIMESTAMP}"
 echo ""
 echo "  Restore:"
-echo "    cp $BACKUP_PATH/smb.conf /etc/samba/ && systemctl restart smb"
+echo "    cp $BACKUP_PATH/vsftpd.conf /etc/vsftpd/ && systemctl restart vsftpd"
+echo "    cp $BACKUP_PATH/user_list /etc/vsftpd/ && systemctl restart vsftpd"
 echo "    cp $BACKUP_PATH/named.conf /etc/ && systemctl restart named"
 echo "    cp $BACKUP_PATH/pg_hba.conf /etc/postgresql/*/main/ && systemctl restart postgresql"

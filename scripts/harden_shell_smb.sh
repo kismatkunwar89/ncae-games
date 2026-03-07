@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NCAE Cyber Games 2026 - Shell / SMB Hardening (Rocky Linux 9)
+# NCAE Cyber Games 2026 - Shell / FTP Hardening (Rocky Linux 9)
 # VM: 172.18.14.t (DHCP on External LAN)
-# Services: SSH Login (1000), SMB Login (500), SMB Write (1000), SMB Read (1000)
-#           => 3500pts total
+# Services: SSH Login (500), FTP Content (1500), FTP Write (500)
+#           => 2500pts total
 #
 # FIXES:
 #   - Scoring password preserved unless explicitly provided
@@ -11,17 +11,17 @@
 #   - Operator account preserved automatically
 #   - SSH password auth stays enabled until scoring key confirmed, then locked
 #   - Firewall moved to separate script once topology is confirmed
-#   - nmb made optional (may not exist on Rocky 9 minimal)
-#   - Share names flagged as TBD - check scoreboard at 10:30 AM
+#   - vsftpd replaces the old SMB-based shell model
+#   - FTP content/write paths are created for scoring checks
 #   - CISA 14+ char passwords for all local users
-#   - Disk quota guard against write-fill DoS
+#   - Disk quota guard against FTP write-fill DoS
 # Run as root. Re-run safe.
 # =============================================================================
 LOGFILE="/vagrant/logs/ncae_harden_shell.log"
 mkdir -p /vagrant/logs
 touch "$LOGFILE" && chmod 600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
-echo "[$(date)] === Shell/SMB Hardening START ==="
+echo "[$(date)] === Shell/FTP Hardening START ==="
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
@@ -93,7 +93,7 @@ gen_pass() {
 CRED_FILE="/root/ncae_credentials_shell.txt"
 touch "$CRED_FILE"
 chmod 600 "$CRED_FILE"
-echo "# NCAE Shell/SMB Credentials - $(date)" >> "$CRED_FILE"
+echo "# NCAE Shell/FTP Credentials - $(date)" >> "$CRED_FILE"
 
 # -- Scoring password policy ---------------------------------------------------
 # SAFETY: Do not change the scoring password unless explicitly provided or we
@@ -119,7 +119,7 @@ if [[ "${NCAE_SKIP_INSTALL:-0}" == "1" ]]; then
 else
     echo "[*] Installing packages..."
     # Core packages - must succeed
-    dnf install -y samba samba-client samba-common libcap \
+    dnf install -y vsftpd libcap curl \
         policycoreutils-python-utils quota
     # fail2ban requires EPEL - optional, skip silently if unavailable
     dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available (EPEL not enabled) - skipping"
@@ -127,7 +127,7 @@ fi
 
 # -- 3. User lockdown + admin account policy ----------------------------------
 echo "[*] Hardening accounts..."
-KEEP_USERS=("root" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
+KEEP_USERS=("root" "scoring" "nobody" "daemon" "dbus" "systemd-network")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
 if [[ -n "$OPERATOR_USER" ]]; then
     KEEP_USERS+=("$OPERATOR_USER")
@@ -194,13 +194,13 @@ if ! id scoring &>/dev/null; then
 fi
 if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
     echo "scoring:$NCAE_SCORING_PASS" | chpasswd
-    echo "SCORING SMB/SSH password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
+    echo "SCORING FTP/SSH password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
 elif [[ "$SCORING_CREATED" -eq 1 ]]; then
     NCAE_SCORING_PASS=$(gen_pass 16)
     SCORING_PASS_KNOWN=1
     echo "scoring:$NCAE_SCORING_PASS" | chpasswd
     echo "[*] Created scoring user with generated temporary password"
-    echo "SCORING SMB/SSH temporary password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
+    echo "SCORING FTP/SSH temporary password: $NCAE_SCORING_PASS" >> "$CRED_FILE"
 else
     echo "[*] Preserving existing scoring password (no NCAE_SCORING_PASS provided)"
 fi
@@ -241,7 +241,7 @@ LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
 # NOTE: Do not restrict SSH by source subnet here.
-# Apply network policy separately with firewall_shell_smb.sh after the real
+# Apply network policy separately with firewall_shell_ftp.sh after the real
 # admin/scoring paths are confirmed for the event environment.
 EOF
 
@@ -263,116 +263,67 @@ EOF
 chmod +x /root/ncae_lock_ssh.sh
 systemctl restart sshd 2>/dev/null || true
 
-# -- 7. SMB share setup --------------------------------------------------------
-echo "[*] Setting up SMB shares..."
-# NOTE: Share names below are placeholders.
-# Check the competition scoreboard at 10:30 AM for exact share names the scoring engine expects.
-# Common names: 'share', 'files', 'data', 'scoring', 'public'
-# Update [share_name] sections in /etc/samba/smb.conf if needed.
-SMB_WRITE_DIR="/srv/samba/write"
-SMB_READ_DIR="/srv/samba/read"
-mkdir -p "$SMB_WRITE_DIR" "$SMB_READ_DIR"
+# -- 7. FTP content/write setup ------------------------------------------------
+echo "[*] Setting up FTP content..."
+FTP_ROOT="/srv/ftp/scoring"
+FTP_UPLOAD_DIR="${FTP_ROOT}/upload"
+mkdir -p "$FTP_ROOT" "$FTP_UPLOAD_DIR"
 
-# Populate read share with scoring-expected files
-cat > "$SMB_READ_DIR/readme.txt" <<'EOF'
-NCAE CyberGames 2026 - UNH Blue Team
-SMB Read Share - operational
+cat > "${FTP_ROOT}/readme.txt" <<'EOF'
+NCAE CyberGames 2026 - FTP content available
 EOF
-cat > "$SMB_READ_DIR/scorefile.txt" <<'EOF'
-Team operational - SMB read share active.
+cat > "${FTP_ROOT}/scorefile.txt" <<'EOF'
+Team operational - FTP content path active.
 EOF
 
-chown -R scoring:scoring "$SMB_WRITE_DIR" "$SMB_READ_DIR"
-chmod 770 "$SMB_WRITE_DIR"
-chmod 755 "$SMB_READ_DIR"
+chown -R scoring:scoring "$FTP_ROOT"
+chmod 755 "$FTP_ROOT"
+chmod 775 "$FTP_UPLOAD_DIR"
 
-# SMB scoring user
-# smbpasswd -a adds the user to Samba's password database (separate from /etc/shadow)
-# -s reads password from stdin (non-interactive), two copies = password + confirmation
-# Samba uses its own TDB password database, NOT the system /etc/shadow
-if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
-    echo -e "${NCAE_SCORING_PASS}\n${NCAE_SCORING_PASS}" | smbpasswd -s -a scoring 2>/dev/null || true
-    smbpasswd -e scoring 2>/dev/null || true  # -e enables the account (it may be disabled by default)
-else
-    echo "[!] SMB password preserved/unknown - add scoring to Samba manually when the correct password is known:"
-    echo "    smbpasswd -a scoring && smbpasswd -e scoring"
-fi
-
-# -- 8. smb.conf --------------------------------------------------------------
-# SMBv2+ only (server min protocol = SMB2): disables SMBv1 which has known
-# critical vulnerabilities (EternalBlue/WannaCry). Scoring engine supports SMB2+.
-# ntlm auth = ntlmv2-only: disables NTLMv1 (easily cracked) and anonymous NTLM
-# restrict anonymous = 2: prevents unauthenticated listing of shares
-# server signing = mandatory: requires message signing, prevents MITM/relay attacks
-echo "[*] Writing smb.conf..."
-cp /etc/samba/smb.conf "/etc/samba/smb.conf.bak.$(date +%s)" 2>/dev/null || true
-
-cat > /etc/samba/smb.conf <<EOF
-[global]
-    workgroup = NCAE
-    server string = UNH Shell ${TEAM}
-    netbios name = SHELL${TEAM}
-    security = user
-    map to guest = Never
-    passdb backend = tdbsam
-    log file = /var/log/samba/log.%m
-    max log size = 50
-    logging = file
-
-    # Harden: SMBv2+ only
-    server min protocol = SMB2
-    ntlm auth = ntlmv2-only
-    restrict anonymous = 2
-    client signing = auto
-    server signing = mandatory
-
-# -- WRITE SHARE --------------------------------------------------------------
-# [!] Rename section if scoreboard specifies a different share name
-[write]
-    comment = Scoring Write Share
-    path = ${SMB_WRITE_DIR}
-    browseable = yes
-    read only = no
-    writable = yes
-    valid users = scoring
-    create mask = 0664
-    directory mask = 0775
-    force user = scoring
-
-# -- READ SHARE ---------------------------------------------------------------
-# [!] Rename section if scoreboard specifies a different share name
-[read]
-    comment = Scoring Read Share
-    path = ${SMB_READ_DIR}
-    browseable = yes
-    read only = yes
-    valid users = scoring
-    force user = scoring
+# -- 8. vsftpd ---------------------------------------------------------------
+echo "[*] Writing vsftpd.conf..."
+cp /etc/vsftpd/vsftpd.conf "/etc/vsftpd/vsftpd.conf.bak.$(date +%s)" 2>/dev/null || true
+cat > /etc/vsftpd/vsftpd.conf <<EOF
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=NO
+xferlog_enable=YES
+log_ftp_protocol=YES
+use_localtime=YES
+connect_from_port_20=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+userlist_enable=YES
+userlist_deny=NO
+userlist_file=/etc/vsftpd/user_list
+pam_service_name=vsftpd
+pasv_enable=YES
+pasv_min_port=30000
+pasv_max_port=30010
+local_root=${FTP_ROOT}
 EOF
+printf 'scoring\n' > /etc/vsftpd/user_list
 
-# testparm validates smb.conf syntax and logic - run this after any manual edits too
-testparm -s /etc/samba/smb.conf 2>/dev/null && echo "[+] smb.conf valid" || echo "[!] smb.conf invalid - check above"
+# -- 9. Start FTP --------------------------------------------------------------
+echo "[*] Starting vsftpd..."
+systemctl enable vsftpd 2>/dev/null || true
+systemctl restart vsftpd 2>/dev/null || true
 
-# -- 9. Start Samba ------------------------------------------------------------
-echo "[*] Starting Samba..."
-systemctl enable smb 2>/dev/null || true
-systemctl restart smb 2>/dev/null || true
-# nmb may not exist on Rocky 9 minimal - optional
-systemctl enable nmb 2>/dev/null || true
-systemctl restart nmb 2>/dev/null || true
 # -- 10. SELinux contexts ------------------------------------------------------
-# SELinux on Rocky Linux enforces mandatory access control based on file labels
-# samba_share_t is the correct type for files/dirs that Samba is allowed to serve
-# Without this, SELinux will block Samba from reading the share dirs even though
-# Unix permissions are correct. restorecon applies the labels we set with semanage.
 echo "[*] Setting SELinux contexts..."
-semanage fcontext -a -t samba_share_t "${SMB_WRITE_DIR}(/.*)?" 2>/dev/null || true
-semanage fcontext -a -t samba_share_t "${SMB_READ_DIR}(/.*)?" 2>/dev/null || true
-restorecon -Rv "$SMB_WRITE_DIR" "$SMB_READ_DIR" 2>/dev/null || true
+semanage fcontext -a -t public_content_t "${FTP_ROOT}(/.*)?" 2>/dev/null || true
+semanage fcontext -a -t public_content_rw_t "${FTP_UPLOAD_DIR}(/.*)?" 2>/dev/null || true
+restorecon -Rv "$FTP_ROOT" "$FTP_UPLOAD_DIR" 2>/dev/null || true
+setsebool -P ftpd_use_passive_mode on 2>/dev/null || true
+setsebool -P ftp_home_dir on 2>/dev/null || true
 
 # -- 11. Firewall --------------------------------------------------------------
 echo "[*] Skipping firewall changes in host hardening by design"
-echo "    Run: bash firewall_shell_smb.sh"
+echo "    Run: bash firewall_shell_ftp.sh"
 echo "    only after confirming the real admin and scoring network paths."
 
 # -- 12. Fail2Ban --------------------------------------------------------------
@@ -380,23 +331,21 @@ echo "[*] Installing Fail2Ban..."
 systemctl enable fail2ban 2>/dev/null || true
 systemctl start fail2ban 2>/dev/null || true
 # -- 13a. Disk write DoS guard --------------------------------------------------
-# Red team might flood the write share with large files to fill the disk
-# This fills /srv/samba/write which could crash services that write to /
-# Alert-only (not auto-delete) to avoid accidentally removing scoring files
-echo "[*] Setting write share quota guard (1GB max - alert only, no auto-delete)..."
-cat > /usr/local/bin/ncae_smb_quota_check.sh <<'QUOTAEOF'
+# Red team might flood the FTP upload path with large files to fill the disk.
+echo "[*] Setting FTP upload quota guard (1GB max - alert only, no auto-delete)..."
+cat > /usr/local/bin/ncae_ftp_quota_check.sh <<'QUOTAEOF'
 #!/bin/bash
-WRITE_DIR="/srv/samba/write"
+WRITE_DIR="/srv/ftp/scoring/upload"
 SIZE=$(du -sb "$WRITE_DIR" 2>/dev/null | awk '{print $1}')
 LIMIT=1073741824  # 1GB
 if [[ "$SIZE" -gt "$LIMIT" ]]; then
-    echo "[ALERT][$(date)] SMB write share exceeds 1GB (${SIZE} bytes) - possible disk fill attack" \
+    echo "[ALERT][$(date)] FTP upload path exceeds 1GB (${SIZE} bytes) - possible disk fill attack" \
         | tee -a /var/log/ncae_alerts.log
 fi
 QUOTAEOF
-chmod +x /usr/local/bin/ncae_smb_quota_check.sh
-cat > /etc/cron.d/ncae_smb_quota <<'EOF'
-* * * * * root /usr/local/bin/ncae_smb_quota_check.sh
+chmod +x /usr/local/bin/ncae_ftp_quota_check.sh
+cat > /etc/cron.d/ncae_ftp_quota <<'EOF'
+* * * * * root /usr/local/bin/ncae_ftp_quota_check.sh
 EOF
 
 # -- 13b. Auditd ---------------------------------------------------------------
@@ -406,8 +355,9 @@ systemctl enable auditd 2>/dev/null || true
 systemctl start auditd 2>/dev/null || true
 mkdir -p /etc/audit/rules.d
 cat > /etc/audit/rules.d/ncae_shell.rules <<'AUDITEOF'
--w /etc/samba/smb.conf -p wa -k smb_config
--w /srv/samba -p wa -k smb_shares
+-w /etc/vsftpd/vsftpd.conf -p wa -k ftp_config
+-w /etc/vsftpd/user_list -p wa -k ftp_config
+-w /srv/ftp -p wa -k ftp_content
 -w /etc/ssh/sshd_config.d -p wa -k ssh_config_changes
 -w /home/scoring/.ssh/authorized_keys -p wa -k scoring_keys_tamper
 -w /root/.ssh/authorized_keys -p wa -k root_keys_tamper
@@ -456,30 +406,27 @@ AUDITEOF
 augenrules --load 2>/dev/null || auditctl -R /etc/audit/rules.d/ncae_mitre_extended.rules 2>/dev/null || true
 
 # -- 14. Watchdog cron ---------------------------------------------------------
-cat > /etc/cron.d/ncae_smb_watchdog <<'EOF'
-* * * * * root systemctl is-active --quiet smb  || systemctl restart smb 2>/dev/null
+cat > /etc/cron.d/ncae_ftp_watchdog <<'EOF'
+* * * * * root systemctl is-active --quiet vsftpd || systemctl restart vsftpd 2>/dev/null
 * * * * * root systemctl is-active --quiet sshd || systemctl restart sshd 2>/dev/null
 EOF
 
 echo ""
-echo "[$(date)] === Shell/SMB Hardening COMPLETE ==="
+echo "[$(date)] === Shell/FTP Hardening COMPLETE ==="
 echo "Credentials: $CRED_FILE"
 echo ""
-echo "SCORING CHECKLIST (3500pts):"
-echo "  SSH Login  (1000): Add scoring pubkey to $AUTH_KEYS"
+echo "SCORING CHECKLIST (2500pts):"
+echo "  SSH Login   (500): Add scoring pubkey to $AUTH_KEYS"
 echo "    -> Then run: /root/ncae_lock_ssh.sh"
-echo "  Firewall   (later): run firewall_shell_smb.sh after confirming admin/scoring subnets"
+echo "  Firewall    (later): run firewall_shell_ftp.sh after confirming admin/scoring subnets"
 if [[ "$SCORING_PASS_KNOWN" -eq 1 ]]; then
-    echo "  SMB Login  (500):  smbclient -L //${NCAE_SHELL_IP}/ -U scoring%\$(grep SCORING $CRED_FILE | awk '{print \$NF}')"
-    echo "  SMB Write  (1000): smbclient //${NCAE_SHELL_IP}/write -U scoring%'<pass>' -c 'put /etc/hostname test.txt'"
-    echo "  SMB Read   (1000): smbclient //${NCAE_SHELL_IP}/read  -U scoring%'<pass>' -c 'get readme.txt /tmp/readme.txt'"
+    echo "  FTP Content (1500): curl --user scoring:\$(grep 'SCORING FTP' $CRED_FILE | awk '{print \$NF}' | tail -1) ftp://${NCAE_SHELL_IP}/readme.txt"
+    echo "  FTP Write   (500):  curl -T /etc/hostname --user scoring:'<pass>' ftp://${NCAE_SHELL_IP}/upload/test.txt"
     echo "  (Password in $CRED_FILE)"
 else
-    echo "  SMB Login  (500):  set/confirm the competition scoring password, then: smbpasswd -a scoring"
-    echo "  SMB Write  (1000): after password is known, test //${NCAE_SHELL_IP}/write"
-    echo "  SMB Read   (1000): after password is known, test //${NCAE_SHELL_IP}/read"
+    echo "  FTP Content (1500): after password is known, test ftp://${NCAE_SHELL_IP}/readme.txt"
+    echo "  FTP Write   (500):  after password is known, test ftp://${NCAE_SHELL_IP}/upload/"
     echo "  (Password preserved/not recorded here; use competition-provided credential)"
 fi
 echo ""
-echo "  [!!] CHECK SCOREBOARD AT 10:30 AM for exact share names expected by scoring engine"
-echo "       If wrong, edit /etc/samba/smb.conf share names and: systemctl restart smb"
+echo "  [!!] CHECK SCOREBOARD AT 10:30 AM for exact FTP content filenames expected by scoring engine"

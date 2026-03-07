@@ -140,7 +140,7 @@ grep -rn --include="*.php" --include="*.phtml" --include="*.py" \
 echo ""
 echo "[ KEY CONFIG FILES ]"
 for f in /etc/ssh/sshd_config /etc/apache2/apache2.conf /etc/nginx/nginx.conf \
-          /etc/named.conf /etc/samba/smb.conf \
+          /etc/named.conf /etc/vsftpd/vsftpd.conf /etc/vsftpd/user_list \
           /etc/postgresql/*/main/postgresql.conf \
           /etc/postgresql/*/main/pg_hba.conf; do
     if [[ -f "$f" ]]; then echo "  EXISTS: $f"; fi

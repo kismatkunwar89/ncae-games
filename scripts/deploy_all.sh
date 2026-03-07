@@ -11,7 +11,7 @@
 #   - 192.168.t.5  -> www     (Apache/HTTPS)
 #   - 192.168.t.7  -> db      (PostgreSQL)
 #   - 192.168.t.12 -> dns     (BIND)
-#   - 172.18.14.t  -> shell   (SSH + Samba) -- NOTE: 172.18 not 192.168
+#   - 172.18.14.t  -> shell   (SSH + FTP) -- NOTE: 172.18 not 192.168
 #   - 192.168.t.15 -> backup  (storage only)
 #   - Manual arg   -> router  (MikroTik via SSH)
 #
@@ -179,7 +179,7 @@ case "$ROLE" in
     www)    run_script "harden_www.sh" ;;
     dns)    run_script "harden_dns.sh" ;;
     db)     run_script "harden_db.sh" ;;
-    shell)  run_script "harden_shell_smb.sh" ;;
+    shell)  run_script "harden_shell_ftp.sh" ;;
     backup) run_script "harden_backup.sh" ;;
     router)
         # FIXED: $2 is the router IP passed directly to deploy_all.sh
@@ -280,12 +280,11 @@ case "$ROLE" in
         echo "  Verify listen: ss -tlnp | grep 5432"
         ;;
     shell)
-        echo "  SSH    (1000): Add scoring pubkey -> /home/scoring/.ssh/authorized_keys"
+        echo "  SSH    (500): Add scoring pubkey -> /home/scoring/.ssh/authorized_keys"
         echo "    Then: /root/ncae_lock_ssh.sh"
-        echo "  SMB Login (500): smbclient -L //${NCAE_SHELL_IP}/ -U scoring"
-        echo "  SMB Write(1000): smbclient //${NCAE_SHELL_IP}/write -U scoring -c 'put /etc/hostname t'"
-        echo "  SMB Read (1000): smbclient //${NCAE_SHELL_IP}/read -U scoring -c 'get readme.txt /tmp/t'"
-        echo "  [!!] Check scoreboard at 10:30 for exact share names"
+        echo "  FTP Content (1500): curl --user scoring:'<pass>' ftp://${NCAE_SHELL_IP}/readme.txt"
+        echo "  FTP Write   (500):  curl -T /etc/hostname --user scoring:'<pass>' ftp://${NCAE_SHELL_IP}/upload/test.txt"
+        echo "  [!!] Check scoreboard at 10:30 for exact FTP filenames/content expectations"
         ;;
     router)
         echo "  ICMP  (500): ping -c3 ${NCAE_ROUTER_IP}"

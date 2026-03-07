@@ -123,7 +123,7 @@ kill_reverse_shells() {
         grep -v grep
     echo ""
     echo "[*] Non-service established connections:"
-    ss -tunp state established | grep -vE 'sshd|apache|nginx|postgres|named|smbd|nmbd'
+    ss -tunp state established | grep -vE 'sshd|apache|nginx|postgres|named|vsftpd|proftpd'
     echo ""
     read -rp "PID to kill (or 'skip'): " BAD_PID
     [[ "$BAD_PID" == "skip" || -z "$BAD_PID" ]] && return
@@ -357,7 +357,7 @@ restore_config() {
     #   www:   apache2/ nginx/ ssh/ ufw/ ssl_ncae/ webroot/
     #   dns:   ssh/ bind/ var_named/ named.conf
     #   db:    ssh/ pg_hba.conf postgresql.conf
-    #   shell: ssh/ smb.conf
+    #   shell: ssh/ vsftpd.conf / ftp_scoring/
     declare -A DIR_MAP=(
         ["apache2"]="/etc/apache2|apache2"
         ["nginx"]="/etc/nginx|nginx"
@@ -367,10 +367,12 @@ restore_config() {
         ["bind"]="/etc/bind|named bind9"
         ["var_named"]="/var/named|named bind9"
         ["webroot"]="/var/www/html|apache2 nginx"
+        ["ftp_scoring"]="/srv/ftp/scoring|vsftpd proftpd"
     )
     declare -A FILE_MAP=(
         ["named.conf"]="/etc/named.conf|named bind9"
-        ["smb.conf"]="/etc/samba/smb.conf|smb nmb"
+        ["vsftpd.conf"]="/etc/vsftpd/vsftpd.conf|vsftpd proftpd"
+        ["user_list"]="/etc/vsftpd/user_list|vsftpd proftpd"
         ["pg_hba.conf"]="|postgresql"
         ["postgresql.conf"]="|postgresql"
     )
@@ -467,7 +469,7 @@ restart_all_services() {
     echo "  1) Sequential (safe, slower)"
     echo "  2) Parallel (faster, less output)"
     read -rp "Mode (1/2): " MODE
-    for svc in apache2 nginx named bind9 postgresql smb nmb samba ssh sshd; do
+    for svc in apache2 nginx named bind9 postgresql vsftpd proftpd ssh sshd; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             if [[ "$MODE" == "2" ]]; then
                 systemctl restart "$svc" 2>/dev/null &
@@ -482,7 +484,7 @@ restart_all_services() {
     if [[ "$MODE" == "2" ]]; then
         wait
         echo "[*] All restarts fired. Status:"
-        for svc in apache2 nginx named bind9 postgresql smb nmb samba ssh sshd; do
+        for svc in apache2 nginx named bind9 postgresql vsftpd proftpd ssh sshd; do
             systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service" || continue
             systemctl is-active --quiet "$svc" 2>/dev/null && \
                 echo "  [+] $svc UP" || echo "  [!] $svc DOWN"
@@ -495,7 +497,7 @@ restart_all_services() {
 status_snapshot() {
     banner "STATUS SNAPSHOT @ $(date '+%H:%M:%S')"
     echo "[ SERVICES ]"
-    for svc in apache2 nginx named bind9 postgresql smb samba ssh sshd; do
+    for svc in apache2 nginx named bind9 postgresql vsftpd proftpd ssh sshd; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             systemctl is-active --quiet "$svc" 2>/dev/null && \
                 echo "  [UP]   $svc" || echo "  [DOWN] $svc"
