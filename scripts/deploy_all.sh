@@ -52,19 +52,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # and type the correct ones — the script uses whatever you confirm.
 MY_IPS=$(ip addr show | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+')
 
+TEAM="${TEAM:-}"
+if [[ -z "$TEAM" && -n "${NCAE_LAN_BASE:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN_BASE}" | awk -F. '{print $3}')
+fi
+if [[ -z "$TEAM" && -n "${NCAE_LAN:-}" ]]; then
+    TEAM=$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//' | awk -F. '{print $3}')
+fi
 # Try 192.168.t.x first, then 172.18.14.t (shell VM)
-TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
-[[ -z "$TEAM" ]] && \
+if [[ -z "$TEAM" ]]; then
+    TEAM=$(echo "$MY_IPS" | grep -oP '192\.168\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+if [[ -z "$TEAM" ]]; then
     TEAM=$(echo "$MY_IPS" | grep -oP '172\.18\.14\.\K[0-9]+' | grep -E '^[0-9]+$' | head -1 || true)
+fi
+
+_LAN_HINT="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+_LAN_BASE_HINT="${NCAE_LAN_BASE:-$(echo "${_LAN_HINT}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+_SCORING_HINT="${NCAE_SCORING:-172.18.0.0/16}"
+_SHELL_IP_HINT="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
+_BACKUP_IP_HINT="${NCAE_BACKUP_IP:-${_LAN_BASE_HINT}.15}"
+_CA_IP_HINT="${NCAE_CA_IP:-172.18.0.38}"
+_ROUTER_IP_HINT="${NCAE_ROUTER_IP:-172.18.13.${TEAM}}"
 
 # Try role from default last-octet assignments
 ROLE="${1:-auto}"
 if [[ "$ROLE" == "auto" && -n "$TEAM" ]]; then
-    if   echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.5";   then ROLE="www"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.7";   then ROLE="db"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.12";  then ROLE="dns"
-    elif echo "$MY_IPS" | grep -q "172\.18\.14\.${TEAM}";   then ROLE="shell"
-    elif echo "$MY_IPS" | grep -q "192\.168\.${TEAM}\.15";  then ROLE="backup"
+    if   echo "$MY_IPS" | grep -q "${_LAN_BASE_HINT}\.5";   then ROLE="www"
+    elif echo "$MY_IPS" | grep -q "${_LAN_BASE_HINT}\.7";   then ROLE="db"
+    elif echo "$MY_IPS" | grep -q "${_LAN_BASE_HINT}\.12";  then ROLE="dns"
+    elif echo "$MY_IPS" | grep -q "${_SHELL_IP_HINT}";      then ROLE="shell"
+    elif echo "$MY_IPS" | grep -q "${_BACKUP_IP_HINT}";     then ROLE="backup"
     else
         ROLE=""
     fi
@@ -84,18 +102,22 @@ if [[ "${NCAE_AUTO_ACCEPT:-0}" == "1" ]]; then
 else
     read -rp "  Team number [${TEAM}]: " _IN;  [[ -n "$_IN" ]] && TEAM="$_IN"
     read -rp "  Role        [${ROLE}]: " _IN;  [[ -n "$_IN" ]] && ROLE="$_IN"
-    _LAN_DEF="${NCAE_LAN:-192.168.${TEAM}.0/24}"
-    _SCR_DEF="${NCAE_SCORING:-172.18.0.0/16}"
+    _LAN_DEF="${_LAN_HINT}"
+    _SCR_DEF="${_SCORING_HINT}"
     read -rp "  LAN subnet  [${_LAN_DEF}]: " _IN;  [[ -n "$_IN" ]] && _LAN_DEF="$_IN"
     read -rp "  Scoring net [${_SCR_DEF}]: " _IN;  [[ -n "$_IN" ]] && _SCR_DEF="$_IN"
     export NCAE_LAN="$_LAN_DEF"
     export NCAE_SCORING="$_SCR_DEF"
 fi
 # Defaults when auto-accept or env not set by prompt above
-export NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
-export NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
+export NCAE_LAN="${NCAE_LAN:-${_LAN_HINT}}"
+export NCAE_SCORING="${NCAE_SCORING:-${_SCORING_HINT}}"
 # Derive LAN base prefix (e.g. "192.168.5" from "192.168.5.0/24") for building host IPs
 export NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+export NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
+export NCAE_BACKUP_IP="${NCAE_BACKUP_IP:-${NCAE_LAN_BASE}.15}"
+export NCAE_CA_IP="${NCAE_CA_IP:-${_CA_IP_HINT}}"
+export NCAE_ROUTER_IP="${NCAE_ROUTER_IP:-${_ROUTER_IP_HINT}}"
 # Export TEAM so harden scripts don't re-detect from IP (important when subnet != 192.168.x.x)
 export TEAM
 echo "[*] Team=$TEAM  Role=$ROLE  LAN=${NCAE_LAN}  Scoring=${NCAE_SCORING}"
@@ -196,7 +218,7 @@ echo "[PHASE 4] Config backup..."
 if [[ "${NCAE_SKIP_BACKUP:-0}" == "1" ]]; then
     echo "[*] Skipping backup push (NCAE_SKIP_BACKUP=1)"
 else
-    run_script "backup_configs.sh" "${NCAE_LAN_BASE}.15"
+    run_script "backup_configs.sh" "${NCAE_BACKUP_IP}"
 fi
 
 # -- Phase 5: Script integrity lock --------------------------------------------
@@ -243,13 +265,13 @@ case "$ROLE" in
         echo "  HTTP   (500): curl -I http://${NCAE_LAN_BASE}.5"
         echo "  SSL   (1500): curl -Ik https://${NCAE_LAN_BASE}.5"
         echo "  CONTENT(1500): curl -sk https://${NCAE_LAN_BASE}.5 | grep -i '<title>'"
-        echo "  [!!] Replace self-signed cert: /etc/ssl/ncae/certs/server.csr -> CA 172.18.0.38"
+        echo "  [!!] Replace self-signed cert: /etc/ssl/ncae/certs/server.csr -> CA ${NCAE_CA_IP}"
         ;;
     dns)
         echo "  INT FWD (500): dig @${NCAE_LAN_BASE}.12 www.team${TEAM}.local"
         echo "  INT REV (500): dig @${NCAE_LAN_BASE}.12 -x ${NCAE_LAN_BASE}.5"
-        echo "  EXT FWD (500): dig @172.18.13.${TEAM} www.team${TEAM}.local"
-        echo "  EXT REV (500): dig @172.18.13.${TEAM} -x ${NCAE_LAN_BASE}.5"
+        echo "  EXT FWD (500): dig @${NCAE_ROUTER_IP} www.team${TEAM}.local"
+        echo "  EXT REV (500): dig @${NCAE_ROUTER_IP} -x ${NCAE_LAN_BASE}.5"
         echo "  [!!] Router port forwards 53 TCP+UDP -> ${NCAE_LAN_BASE}.12 required"
         ;;
     db)
@@ -260,13 +282,13 @@ case "$ROLE" in
     shell)
         echo "  SSH    (1000): Add scoring pubkey -> /home/scoring/.ssh/authorized_keys"
         echo "    Then: /root/ncae_lock_ssh.sh"
-        echo "  SMB Login (500): smbclient -L //172.18.14.${TEAM}/ -U scoring"
-        echo "  SMB Write(1000): smbclient //172.18.14.${TEAM}/write -U scoring -c 'put /etc/hostname t'"
-        echo "  SMB Read (1000): smbclient //172.18.14.${TEAM}/read -U scoring -c 'get readme.txt /tmp/t'"
+        echo "  SMB Login (500): smbclient -L //${NCAE_SHELL_IP}/ -U scoring"
+        echo "  SMB Write(1000): smbclient //${NCAE_SHELL_IP}/write -U scoring -c 'put /etc/hostname t'"
+        echo "  SMB Read (1000): smbclient //${NCAE_SHELL_IP}/read -U scoring -c 'get readme.txt /tmp/t'"
         echo "  [!!] Check scoreboard at 10:30 for exact share names"
         ;;
     router)
-        echo "  ICMP  (500): ping -c3 172.18.13.${TEAM}"
+        echo "  ICMP  (500): ping -c3 ${NCAE_ROUTER_IP}"
         echo "  Verify: /ip firewall nat print | grep ncae"
         ;;
     backup)

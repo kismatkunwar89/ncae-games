@@ -10,12 +10,12 @@ fi
 SERVICE="$1"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEAM="${TEAM:-1}"
-NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
+NCAE_LAN="${NCAE_LAN:-10.88.${TEAM}.0/24}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
-NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
-NCAE_SHELL_IP="${NCAE_SHELL_IP:-172.18.14.${TEAM}}"
+NCAE_SCORING="${NCAE_SCORING:-10.77.0.0/16}"
+NCAE_SHELL_IP="${NCAE_SHELL_IP:-10.77.14.${TEAM}}"
 NCAE_BACKUP_IP="${NCAE_BACKUP_IP:-${NCAE_LAN_BASE}.15}"
-NCAE_CA_IP="${NCAE_CA_IP:-172.18.0.38}"
+NCAE_CA_IP="${NCAE_CA_IP:-10.77.0.38}"
 
 case "$SERVICE" in
     shell|www|db|dns|backup) ;;
@@ -39,4 +39,4 @@ docker compose -f "$ROOT_DIR/docker/lab/compose.yaml" exec \
     -e NCAE_SKIP_UPDATE=1 \
     -e NCAE_SKIP_INSTALL=1 \
     "$SERVICE" \
-    bash /opt/ncae/scripts/deploy_all.sh
+    bash /opt/ncae/scripts/deploy_all.sh "$SERVICE"

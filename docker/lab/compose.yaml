@@ -2,15 +2,16 @@ name: ncae-lab
 
 x-topology-env: &topology-env
   TEAM: "1"
-  NCAE_LAN: "192.168.1.0/24"
-  NCAE_LAN_BASE: "192.168.1"
-  NCAE_SCORING: "172.18.0.0/16"
-  NCAE_SHELL_IP: "172.18.14.1"
-  NCAE_BACKUP_IP: "192.168.1.15"
-  NCAE_CA_IP: "172.18.0.38"
+  NCAE_LAN: "10.88.1.0/24"
+  NCAE_LAN_BASE: "10.88.1"
+  NCAE_SCORING: "10.77.0.0/16"
+  NCAE_SHELL_IP: "10.77.14.1"
+  NCAE_BACKUP_IP: "10.88.1.15"
+  NCAE_CA_IP: "10.77.0.38"
 
 x-common: &common
   privileged: true
+  cgroup: host
   stdin_open: true
   tty: true
   tmpfs:
@@ -20,7 +21,7 @@ x-common: &common
   volumes:
     - ../../:/opt/ncae
     - ./logs:/vagrant/logs
-    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    - /sys/fs/cgroup:/sys/fs/cgroup
   environment:
     <<: *topology-env
     NCAE_AUTO_ACCEPT: "1"
@@ -38,9 +39,9 @@ services:
     command: ["/sbin/init"]
     networks:
       ncae_external:
-        ipv4_address: 172.18.13.1
+        ipv4_address: 10.77.13.1
       ncae_internal:
-        ipv4_address: 192.168.1.1
+        ipv4_address: 10.88.1.254
 
   scoring:
     <<: *common
@@ -52,7 +53,7 @@ services:
     command: ["/sbin/init"]
     networks:
       ncae_external:
-        ipv4_address: 172.18.0.38
+        ipv4_address: 10.77.0.38
 
   shell:
     <<: *common
@@ -72,7 +73,7 @@ services:
       NCAE_SCORING_PASS: "LabShell123!A"
     networks:
       ncae_external:
-        ipv4_address: 172.18.14.1
+        ipv4_address: 10.77.14.1
 
   www:
     <<: *common
@@ -91,7 +92,7 @@ services:
       NCAE_SKIP_INSTALL: "1"
     networks:
       ncae_internal:
-        ipv4_address: 192.168.1.5
+        ipv4_address: 10.88.1.5
 
   db:
     <<: *common
@@ -111,7 +112,7 @@ services:
       NCAE_DB_PASS: "LabDb123!A"
     networks:
       ncae_internal:
-        ipv4_address: 192.168.1.7
+        ipv4_address: 10.88.1.7
 
   dns:
     <<: *common
@@ -130,7 +131,7 @@ services:
       NCAE_SKIP_INSTALL: "1"
     networks:
       ncae_internal:
-        ipv4_address: 192.168.1.12
+        ipv4_address: 10.88.1.12
 
   backup:
     <<: *common
@@ -149,16 +150,16 @@ services:
       NCAE_SKIP_INSTALL: "1"
     networks:
       ncae_internal:
-        ipv4_address: 192.168.1.15
+        ipv4_address: 10.88.1.15
 
 networks:
   ncae_external:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.18.0.0/16
+        - subnet: 10.77.0.0/16
   ncae_internal:
     driver: bridge
     ipam:
       config:
-        - subnet: 192.168.1.0/24
+        - subnet: 10.88.1.0/24
