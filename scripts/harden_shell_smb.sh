@@ -7,13 +7,14 @@
 #
 # FIXES:
 #   - Scoring password preserved unless explicitly provided
+#   - Operator/root passwords preserved unless explicitly rotated by the team
 #   - Full package update skipped by default
 #   - Operator account preserved automatically
 #   - SSH password auth stays enabled until scoring key confirmed, then locked
 #   - Firewall moved to separate script once topology is confirmed
 #   - vsftpd replaces the old SMB-based shell model
 #   - FTP content/write paths are created for scoring checks
-#   - CISA 14+ char passwords for all local users
+#   - Extra users are locked without generating unknown replacement passwords
 #   - Disk quota guard against FTP write-fill DoS
 # Run as root. Re-run safe.
 # =============================================================================
@@ -95,9 +96,12 @@ touch "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 echo "# NCAE Shell/FTP Credentials - $(date)" >> "$CRED_FILE"
 
-# -- Scoring password policy ---------------------------------------------------
-# SAFETY: Do not change the scoring password unless explicitly provided or we
-# are creating the scoring user from scratch for a smoke test environment.
+# -- Password rotation policy --------------------------------------------------
+# SAFETY:
+#   - Preserve operator/root passwords by default so the team stays in control.
+#   - Preserve scoring password unless explicitly provided.
+#   - Only generate a temporary scoring password when we are creating that
+#     account from scratch in a lab/smoke-test environment.
 SCORING_PASS_KNOWN=0
 [[ -n "${NCAE_SCORING_PASS:-}" ]] && SCORING_PASS_KNOWN=1
 
@@ -136,8 +140,6 @@ fi
 while IFS= read -r user; do
     uid=$(id -u "$user" 2>/dev/null || echo 0)
     if [[ $uid -ge 1000 ]] && [[ ! " ${KEEP_USERS[*]} " == *" $user "* ]]; then
-        NEW_PASS=$(gen_pass 16)
-        echo "$user:$NEW_PASS" | chpasswd 2>/dev/null || true
         usermod -s /usr/sbin/nologin "$user" 2>/dev/null || true
         passwd -l "$user" 2>/dev/null || true
         for _grp in sudo wheel docker disk shadow adm lxd lxc kvm libvirt; do
@@ -148,16 +150,14 @@ while IFS= read -r user; do
             cp "$_home/.ssh/authorized_keys" "$_home/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
             : > "$_home/.ssh/authorized_keys"
         fi
-        echo "USER $user : $NEW_PASS" >> "$CRED_FILE"
+        echo "USER $user : locked / nologin" >> "$CRED_FILE"
         echo "  [-] Locked + stripped groups + cleared keys: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
 
 if [[ -n "$OPERATOR_USER" && "$OPERATOR_USER" != "root" && "$OPERATOR_USER" != "scoring" ]] && id "$OPERATOR_USER" &>/dev/null; then
     echo "[*] Hardening operator account: $OPERATOR_USER"
-    OPERATOR_PASS=$(gen_pass 20)
-    echo "$OPERATOR_USER:$OPERATOR_PASS" | chpasswd 2>/dev/null || true
-    echo "OPERATOR ${OPERATOR_USER} password: $OPERATOR_PASS" >> "$CRED_FILE"
+    echo "OPERATOR ${OPERATOR_USER} password: preserved" >> "$CRED_FILE"
     usermod -s /bin/bash "$OPERATOR_USER" 2>/dev/null || true
     if getent group wheel >/dev/null; then
         usermod -aG wheel "$OPERATOR_USER" 2>/dev/null || true
@@ -173,12 +173,10 @@ if [[ -n "$OPERATOR_USER" && "$OPERATOR_USER" != "root" && "$OPERATOR_USER" != "
         chmod 600 "$_home/.ssh/authorized_keys" 2>/dev/null || true
         chown "$OPERATOR_USER":"$OPERATOR_USER" "$_home/.ssh/authorized_keys" 2>/dev/null || true
     fi
-    echo "  [+] Operator rotated, kept admin access, stripped extra privileged groups: $OPERATOR_USER"
+    echo "  [+] Operator preserved, kept admin access, stripped extra privileged groups: $OPERATOR_USER"
 fi
 
-ROOT_PASS=$(gen_pass 20)
-echo "root:$ROOT_PASS" | chpasswd 2>/dev/null || true
-echo "ROOT password: $ROOT_PASS" >> "$CRED_FILE"
+echo "ROOT password: preserved" >> "$CRED_FILE"
 if [[ -f /root/.ssh/authorized_keys ]]; then
     cp /root/.ssh/authorized_keys "/root/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
     : > /root/.ssh/authorized_keys
