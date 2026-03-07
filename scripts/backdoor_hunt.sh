@@ -79,7 +79,9 @@ done < /etc/passwd
 head "CRON JOBS"
 
 echo "[*] /etc/crontab:"
-if grep -vE '^\s*#|^\s*$' /etc/crontab 2>/dev/null | grep -v 'run-parts\|anacron'; then
+if grep -vE '^\s*#|^\s*$' /etc/crontab 2>/dev/null | \
+   grep -vE '^(SHELL|PATH|MAILTO)=' | \
+   grep -vE 'run-parts|anacron'; then
     flag "Non-standard entries in /etc/crontab (see above)"
 else
     ok "/etc/crontab looks standard"
@@ -88,7 +90,9 @@ fi
 echo "[*] /etc/cron.d/ entries:"
 for f in /etc/cron.d/*; do
     [[ ! -f "$f" ]] && continue
-    suspicious=$(grep -vE '^\s*#|^\s*$' "$f" 2>/dev/null | grep -vE 'run-parts|0anacron' || true)
+    suspicious=$(grep -vE '^\s*#|^\s*$' "$f" 2>/dev/null | \
+        grep -vE '^(SHELL|PATH|MAILTO)=' | \
+        grep -vE 'run-parts|0anacron' || true)
     if [[ -n "$suspicious" ]]; then
         flag "$f contains: $suspicious"
     fi
@@ -189,12 +193,17 @@ if command -v getcap &>/dev/null; then
     #   cap_dac_override - bypass file read/write/execute permission checks
     #   cap_sys_admin - broad system administration (nearly equivalent to root)
     #   cap_net_raw   - raw socket access (packet sniffing)
-    DANGEROUS_CAPS="cap_setuid|cap_dac_override|cap_sys_admin|cap_net_raw|cap_chown|cap_fowner"
+    DANGEROUS_CAPS="cap_setuid|cap_dac_override|cap_sys_admin|cap_chown|cap_fowner"
+    KNOWN_CAPS_REGEX='^(/usr/bin/newuidmap cap_setuid=ep|/usr/bin/newgidmap cap_setgid=ep|/usr/bin/ping cap_net_raw=ep|/usr/bin/arping cap_net_raw=p|/usr/bin/clockdiff cap_net_raw=p)$'
     CAP_OUTPUT=$(getcap -r / 2>/dev/null)
     if [[ -n "$CAP_OUTPUT" ]]; then
         while IFS= read -r line; do
-            if echo "$line" | grep -qE "$DANGEROUS_CAPS"; then
+            if echo "$line" | grep -qE "$KNOWN_CAPS_REGEX"; then
+                warn "Capability set (known default): $line"
+            elif echo "$line" | grep -qE "$DANGEROUS_CAPS"; then
                 flag "DANGEROUS CAPABILITY: $line"
+            elif echo "$line" | grep -q 'cap_net_raw'; then
+                warn "Network/raw capability (verify need): $line"
             else
                 warn "Capability set: $line"
             fi
@@ -219,6 +228,8 @@ KNOWN_SUID=(
     /usr/lib/policykit-1/polkit-agent-helper-1
     /usr/bin/at /usr/bin/crontab /usr/bin/ssh-agent
     /usr/libexec/openssh/ssh-keysign
+    /usr/bin/chage /usr/bin/fusermount3 /usr/sbin/unix_chkpwd
+    /usr/sbin/grub2-set-bootflag /usr/sbin/pam_timestamp_check
 )
 
 while IFS= read -r -d '' f; do
@@ -269,7 +280,7 @@ head "RC.LOCAL AND MOTD"
 
 if [[ -f /etc/rc.local ]]; then
     content=$(grep -vE '^\s*#|^\s*$|^exit' /etc/rc.local 2>/dev/null || true)
-    if [[ -n "$content" ]]; then
+    if [[ -n "$content" && "$content" != "touch /var/lock/subsys/local" ]]; then
         flag "/etc/rc.local has active content: $content"
     else
         ok "/etc/rc.local is empty/default"
@@ -311,6 +322,14 @@ for tmpdir in /tmp /var/tmp /dev/shm; do
     done
     echo "[*] Hidden files in $tmpdir:"
     find "$tmpdir" -name '.*' 2>/dev/null | while read -r f; do
+        case "$f" in
+            /tmp/.X11-unix|/tmp/.ICE-unix|/tmp/.XIM-unix|/tmp/.font-unix)
+                continue
+                ;;
+            /tmp/systemd-private-*|/var/tmp/systemd-private-*)
+                continue
+                ;;
+        esac
         flag "Hidden file: $f"
     done
 done
@@ -413,7 +432,12 @@ for f in "${!EXPECTED_PERMS[@]}"; do
     actual=$(stat -c '%a' "$f" 2>/dev/null)
     owner=$(stat -c '%U:%G' "$f" 2>/dev/null)
     expected="${EXPECTED_PERMS[$f]}"
-    if [[ "$actual" != "$expected" ]]; then
+    if [[ "$f" == "/etc/shadow" || "$f" == "/etc/gshadow" ]]; then
+        [[ "$actual" == "0" ]] && actual="000"
+        if [[ "$actual" != "$expected" && "$actual" != "000" ]]; then
+            flag "$f permissions are $actual (expected $expected or 000) owner=$owner"
+        fi
+    elif [[ "$actual" != "$expected" ]]; then
         flag "$f permissions are $actual (expected $expected) owner=$owner"
     fi
     # All critical files must be owned by root
@@ -434,6 +458,7 @@ done
 echo "[*] Home directory permissions (should be 700 — 755 lets others read files):"
 while IFS=: read -r user _ uid _ _ homedir _; do
     [[ $uid -lt 1000 || -z "$homedir" || ! -d "$homedir" ]] && continue
+    [[ "$homedir" == "/" || "$homedir" == "/nonexistent" ]] && continue
     perms=$(stat -c '%a' "$homedir" 2>/dev/null)
     if [[ "$perms" != "700" && "$perms" != "750" ]]; then
         flag "Home dir $homedir is $perms (user=$user) — other users may read files"
@@ -471,9 +496,9 @@ done
 head "SSH CERTIFICATE PERSISTENCE (T1098.004)"
 
 echo "[*] TrustedUserCAKeys — any CA key here grants SSH access for all users it signs:"
-if grep -rn 'TrustedUserCAKeys' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
+if grep -rEn '^[[:space:]]*TrustedUserCAKeys[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
     flag "TrustedUserCAKeys is set — verify the CA file and all principals it grants access to"
-    grep -rn 'TrustedUserCAKeys' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | \
+    grep -rEn '^[[:space:]]*TrustedUserCAKeys[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | \
         awk '{print $2}' | while read -r cafile; do
             [[ -f "$cafile" ]] && warn "CA key file: $cafile" && cat "$cafile" | sed 's/^/  /'
         done
@@ -482,9 +507,9 @@ else
 fi
 
 echo "[*] AuthorizedPrincipalsFile — overrides authorized_keys; maps cert principals to users:"
-if grep -rn 'AuthorizedPrincipalsFile' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
+if grep -rEn '^[[:space:]]*AuthorizedPrincipalsFile[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
     flag "AuthorizedPrincipalsFile is set — check what principals are allowed"
-    grep -rn 'AuthorizedPrincipalsFile' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
+    grep -rEn '^[[:space:]]*AuthorizedPrincipalsFile[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
 else
     ok "AuthorizedPrincipalsFile not set"
 fi
@@ -555,12 +580,15 @@ find /home /root -path '*/.config/systemd/user/*.timer' 2>/dev/null | while read
 done
 
 echo "[*] Systemd generator paths (T1543.002 — run before normal units):"
-for gendir in /etc/systemd/system-generators /usr/lib/systemd/system-generators \
+for gendir in /etc/systemd/system-generators \
               /run/systemd/generator /run/systemd/generator.early /run/systemd/generator.late; do
     if [[ -d "$gendir" ]]; then
         find "$gendir" -type f 2>/dev/null | while read -r f; do
             if echo "$gendir" | grep -q '/run/systemd/generator'; then
-                flag "Runtime generator (in-memory — disappears on reboot unless seeded): $f"
+                if echo "$f" | grep -qE '\.(mount|swap)$'; then
+                    continue
+                fi
+                warn "Runtime-generated unit (verify source): $f"
             else
                 warn "Generator binary: $f"
             fi
@@ -572,7 +600,7 @@ done
 head "UDEV RULES (T1546.017)"
 
 echo "[*] Scanning udev rules for RUN+= (arbitrary command execution on device event):"
-for rulesdir in /etc/udev/rules.d /run/udev/rules.d /usr/lib/udev/rules.d; do
+for rulesdir in /etc/udev/rules.d /run/udev/rules.d; do
     [[ ! -d "$rulesdir" ]] && continue
     find "$rulesdir" -name '*.rules' -type f 2>/dev/null | while read -r f; do
         if grep -qiE 'RUN\+=' "$f" 2>/dev/null; then
@@ -581,6 +609,7 @@ for rulesdir in /etc/udev/rules.d /run/udev/rules.d /usr/lib/udev/rules.d; do
         fi
     done
 done
+echo "[*] Packaged udev rules in /usr/lib/udev/rules.d are not flagged by default to reduce false positives."
 
 echo "[*] Custom rules in /etc/udev/rules.d (not from packages):"
 find /etc/udev/rules.d -name '*.rules' -type f -newer /etc/hostname 2>/dev/null | while read -r f; do
