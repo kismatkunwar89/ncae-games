@@ -34,6 +34,7 @@ TEAM="${TEAM:-1}"
 NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
 NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
 NCAE_LAN_BASE="${NCAE_LAN_BASE:-$(echo "${NCAE_LAN}" | sed 's/\.[0-9]*\/[0-9]*//')}"
+NCAE_BACKUP_IP="${NCAE_BACKUP_IP:-${NCAE_LAN_BASE}.15}"
 
 cidr_prefix() {
     local cidr="$1" net mask o1 o2 o3 o4
@@ -240,27 +241,113 @@ re_harden() {
 # -- 7: Restore config --------------------------------------------------------
 restore_config() {
     banner "RESTORE CONFIG FROM BACKUP"
+    local local_backup_dir="/root/ncae_config_backups"
+    local local_archive_dir="/var/lib/ncae/.restore_cache"
+    local archive_pass_file="/root/.ncae_backup_archive_pass"
+    local ssh_key="/root/.ssh/ncae_backup_ed25519"
+    local tmp_restore_base="/tmp/ncae_restore_$$_$(date +%s)"
+    local snapshot_label snapshot_type snapshot_path ts
+    local -a choices=() labels=() types=() paths=()
+    mkdir -p "$tmp_restore_base"
+    trap 'rm -rf "$tmp_restore_base"' RETURN
 
-    # Build list of available backup timestamps
-    mapfile -t BACKUPS < <(find /root/ncae_config_backups/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
-    if [[ ${#BACKUPS[@]} -eq 0 ]]; then
-        echo "[!] No local backups found in /root/ncae_config_backups/"
+    add_choice() {
+        labels+=("$1")
+        types+=("$2")
+        paths+=("$3")
+    }
+
+    stage_remote_snapshot() {
+        local remote_ts="$1" remote_stage="$tmp_restore_base/remote_${remote_ts}"
+        local -a ssh_cmd=(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+        [[ -f "$ssh_key" ]] && ssh_cmd+=(-i "$ssh_key")
+        mkdir -p "$remote_stage"
+        echo "[*] Pulling remote backup ${remote_ts} from ${NCAE_BACKUP_IP}..."
+        if ! "${ssh_cmd[@]}" "root@${NCAE_BACKUP_IP}" test -d "/srv/ncae_backups/$(hostname | tr '.' '_')/${remote_ts}" 2>/dev/null; then
+            echo "[!] Remote backup not found on ${NCAE_BACKUP_IP}"
+            return 1
+        fi
+        rsync -az --timeout=30 -e "${ssh_cmd[*]}" \
+            "root@${NCAE_BACKUP_IP}:/srv/ncae_backups/$(hostname | tr '.' '_')/${remote_ts}/" \
+            "$remote_stage/" || return 1
+        echo "$remote_stage"
+    }
+
+    stage_local_archive() {
+        local archive="$1" stage="$tmp_restore_base/archive_$(basename "$archive" .tgz.enc)"
+        local pass
+        [[ ! -f "$archive_pass_file" ]] && { echo "[!] Archive password file missing: $archive_pass_file"; return 1; }
+        mkdir -p "$stage"
+        if [[ -t 0 ]]; then
+            read -rsp "Archive password: " pass
+            echo ""
+            printf '%s' "$pass" | openssl enc -d -aes-256-cbc -pbkdf2 \
+                -pass stdin -in "$archive" | tar -xzf - -C "$stage" || return 1
+        else
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+                -pass file:"$archive_pass_file" -in "$archive" | tar -xzf - -C "$stage" || return 1
+        fi
+        echo "$stage"
+    }
+
+    mapfile -t BACKUPS < <(find "$local_backup_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    for ts in "${BACKUPS[@]}"; do
+        add_choice "LOCAL DIR  $(basename "$ts")" "local_dir" "$ts"
+    done
+
+    mapfile -t ARCHIVES < <(find "$local_archive_dir" -mindepth 1 -maxdepth 1 -type f -name ".*.tgz.enc" 2>/dev/null | sort)
+    for ts in "${ARCHIVES[@]}"; do
+        add_choice "LOCAL ARCH $(basename "$ts")" "local_archive" "$ts"
+    done
+
+    if command -v ssh &>/dev/null; then
+        local -a ssh_cmd=(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+        [[ -f "$ssh_key" ]] && ssh_cmd+=(-i "$ssh_key")
+        if mapfile -t REMOTE_BACKUPS < <("${ssh_cmd[@]}" "root@${NCAE_BACKUP_IP}" "find /srv/ncae_backups/$(hostname | tr '.' '_') -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort" 2>/dev/null); then
+            for ts in "${REMOTE_BACKUPS[@]}"; do
+                [[ -n "$ts" ]] && add_choice "REMOTE     $(basename "$ts") @ ${NCAE_BACKUP_IP}" "remote_dir" "$ts"
+            done
+        fi
+    fi
+
+    if [[ ${#labels[@]} -eq 0 ]]; then
+        echo "[!] No local or remote backups found"
         return
     fi
 
-    echo "[*] Available backups:"
-    for i in "${!BACKUPS[@]}"; do
-        echo "  $((i+1))) ${BACKUPS[$i]}"
+    echo "[*] Available restore sources:"
+    for i in "${!labels[@]}"; do
+        echo "  $((i+1))) ${labels[$i]}"
     done
     echo ""
     read -rp "Select backup number (or 'skip'): " SEL
     [[ "$SEL" == "skip" || -z "$SEL" ]] && return
-    if ! [[ "$SEL" =~ ^[0-9]+$ ]] || [[ $SEL -lt 1 ]] || [[ $SEL -gt ${#BACKUPS[@]} ]]; then
+    if ! [[ "$SEL" =~ ^[0-9]+$ ]] || [[ $SEL -lt 1 ]] || [[ $SEL -gt ${#labels[@]} ]]; then
         echo "[!] Invalid selection"
         return
     fi
-    TS="${BACKUPS[$((SEL-1))]}"
+
+    snapshot_label="${labels[$((SEL-1))]}"
+    snapshot_type="${types[$((SEL-1))]}"
+    snapshot_path="${paths[$((SEL-1))]}"
+    case "$snapshot_type" in
+        local_dir)
+            TS="$snapshot_path"
+            ;;
+        local_archive)
+            TS=$(stage_local_archive "$snapshot_path") || { echo "[!] Could not open encrypted archive"; return; }
+            ;;
+        remote_dir)
+            TS=$(stage_remote_snapshot "$(basename "$snapshot_path")") || { echo "[!] Could not fetch remote backup"; return; }
+            ;;
+        *)
+            echo "[!] Unknown backup type: $snapshot_type"
+            return
+            ;;
+    esac
+
     echo ""
+    echo "[*] Using: $snapshot_label"
     echo "[*] Files in $TS:"
     ls "$TS"
     echo ""

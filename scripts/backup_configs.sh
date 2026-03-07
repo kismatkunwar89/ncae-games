@@ -40,6 +40,8 @@ fi
 TEAM="${TEAM:-1}"
 HOSTNAME_SHORT=$(hostname | tr '.' '_')
 LOCAL_BACKUP="/root/ncae_config_backups"
+LOCAL_ARCHIVE_DIR="/var/lib/ncae/.restore_cache"
+ARCHIVE_PASS_FILE="/root/.ncae_backup_archive_pass"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 NCAE_LAN="${NCAE_LAN:-192.168.${TEAM}.0/24}"
 NCAE_SCORING="${NCAE_SCORING:-172.18.0.0/16}"
@@ -50,6 +52,9 @@ BACKUP_VM_IP="${1:-${NCAE_BACKUP_IP:-${NCAE_LAN_BASE}.15}}"
 
 echo "[$(date)] === Config Backup START - $HOSTNAME_SHORT ==="
 mkdir -p "$LOCAL_BACKUP"
+mkdir -p "$LOCAL_ARCHIVE_DIR"
+chmod 700 /var/lib/ncae 2>/dev/null || true
+chmod 700 "$LOCAL_ARCHIVE_DIR"
 
 # -- SSH key setup for passwordless backup push --------------------------------
 setup_ssh_key() {
@@ -128,6 +133,58 @@ collect_configs() {
     echo "$dest"  # stdout only: the path, nothing else
 }
 
+ensure_archive_passphrase() {
+    [[ -f "$ARCHIVE_PASS_FILE" ]] && return 0
+    [[ "${NCAE_ARCHIVE_LOCAL:-0}" != "1" ]] && [[ ! -t 0 ]] && return 1
+
+    echo ""
+    echo "[*] Optional: create a password-protected local restore archive."
+    echo "    This helps keep local backups less obvious than a plain directory,"
+    echo "    but root on the host can still find/read what it needs."
+    read -rp "    Create encrypted local archives too? (yes/no): " _enc
+    [[ "$_enc" != "yes" ]] && return 1
+
+    while true; do
+        read -rsp "    Archive password: " _p1
+        echo ""
+        read -rsp "    Confirm password: " _p2
+        echo ""
+        if [[ -z "$_p1" ]]; then
+            echo "[!] Password cannot be blank"
+        elif [[ "$_p1" != "$_p2" ]]; then
+            echo "[!] Passwords do not match"
+        else
+            printf '%s\n' "$_p1" > "$ARCHIVE_PASS_FILE"
+            chmod 600 "$ARCHIVE_PASS_FILE"
+            echo "[+] Archive password saved to $ARCHIVE_PASS_FILE (root-only)"
+            unset _p1 _p2
+            return 0
+        fi
+    done
+}
+
+create_local_archive() {
+    local src="$1"
+    local archive="${LOCAL_ARCHIVE_DIR}/.${HOSTNAME_SHORT}_${TIMESTAMP}.tgz.enc"
+
+    if ! command -v openssl &>/dev/null; then
+        echo "[!] openssl not available - skipping encrypted local archive"
+        return 1
+    fi
+
+    if [[ ! -f "$ARCHIVE_PASS_FILE" ]]; then
+        ensure_archive_passphrase || return 1
+    fi
+    [[ ! -f "$ARCHIVE_PASS_FILE" ]] && return 1
+
+    tar -czf - -C "$src" . | \
+        openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -pass file:"$ARCHIVE_PASS_FILE" \
+            -out "$archive"
+    chmod 600 "$archive"
+    echo "[+] Encrypted local archive: $archive"
+}
+
 prune_local() {
     # Keep only the 12 most recent local backup snapshots (1hr at 5min intervals) to prevent disk fill
     # Uses find instead of ls to handle any special characters in directory names
@@ -137,6 +194,16 @@ prune_local() {
         find "$LOCAL_BACKUP" -mindepth 1 -maxdepth 1 -type d -name "2*" 2>/dev/null | \
             sort | head -$((count - 12)) | xargs -r rm -rf
         echo "[*] Pruned to 12 local backups"
+    fi
+}
+
+prune_local_archives() {
+    local count
+    count=$(find "$LOCAL_ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -type f -name ".*.tgz.enc" 2>/dev/null | wc -l)
+    if [[ "$count" -gt 12 ]]; then
+        find "$LOCAL_ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -type f -name ".*.tgz.enc" 2>/dev/null | \
+            sort | head -$((count - 12)) | xargs -r rm -f
+        echo "[*] Pruned to 12 local encrypted archives"
     fi
 }
 
@@ -182,12 +249,16 @@ EOF
 # -- Main ----------------------------------------------------------------------
 setup_ssh_key
 BACKUP_PATH=$(collect_configs)   # Captures clean path from stdout only (FIXED)
+create_local_archive "$BACKUP_PATH" || true
 prune_local
+prune_local_archives
 push_to_backup_vm "$BACKUP_PATH"
 install_cron
 
 echo "[$(date)] === Config Backup COMPLETE ==="
 echo "  Local:  $BACKUP_PATH"
+[[ -f "${LOCAL_ARCHIVE_DIR}/.${HOSTNAME_SHORT}_${TIMESTAMP}.tgz.enc" ]] && \
+    echo "  Archive: ${LOCAL_ARCHIVE_DIR}/.${HOSTNAME_SHORT}_${TIMESTAMP}.tgz.enc"
 echo "  Remote: $BACKUP_VM_IP:/srv/ncae_backups/${HOSTNAME_SHORT}/${TIMESTAMP}"
 echo ""
 echo "  Restore:"

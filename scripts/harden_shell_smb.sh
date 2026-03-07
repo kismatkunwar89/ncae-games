@@ -120,23 +120,7 @@ if [[ -f /root/.ssh/authorized_keys ]]; then
     echo "[*] Cleared root authorized_keys"
 fi
 
-# -- 4. jailed users ------------------------------------------------------
-echo "[*] Creating jailed users..."
-JAILED_USERS=("admin" "smbadmin" "fileadmin")
-for juser in "${JAILED_USERS[@]}"; do
-    if ! id "$juser" &>/dev/null; then
-        useradd -m -s /usr/bin/"$juser" 2>/dev/null || \
-        useradd -m -s /bin/rbash "$juser" 2>/dev/null || true
-    else
-        usermod -s /usr/bin/"$juser" 2>/dev/null || \
-        usermod -s /bin/rbash "$juser" 2>/dev/null || true
-    fi
-    JAIL_PASS=$(gen_pass 16)
-    echo "$juser:$JAIL_PASS" | chpasswd 2>/dev/null || true
-    echo "JAILED $juser : $JAIL_PASS" >> "$CRED_FILE"
-done
-
-# -- 5. Create scoring user ----------------------------------------------------
+# -- 4. Create scoring user ----------------------------------------------------
 echo "[*] Setting up scoring user..."
 if ! id scoring &>/dev/null; then
     useradd -m -s /bin/bash scoring
