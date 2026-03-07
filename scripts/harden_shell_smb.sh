@@ -125,9 +125,9 @@ else
     dnf install -y fail2ban 2>/dev/null || echo "[!] fail2ban not available (EPEL not enabled) - skipping"
 fi
 
-# -- 3. User lockdown + CISA passwords ----------------------------------------
-echo "[*] Locking user accounts with CISA-compliant passwords..."
-KEEP_USERS=("root" "rocky" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
+# -- 3. User lockdown + admin account policy ----------------------------------
+echo "[*] Hardening accounts..."
+KEEP_USERS=("root" "scoring" "nobody" "daemon" "samba" "dbus" "systemd-network")
 [[ -d /vagrant ]] && KEEP_USERS+=("vagrant")
 if [[ -n "$OPERATOR_USER" ]]; then
     KEEP_USERS+=("$OPERATOR_USER")
@@ -152,6 +152,29 @@ while IFS= read -r user; do
         echo "  [-] Locked + stripped groups + cleared keys: $user"
     fi
 done < <(cut -d: -f1 /etc/passwd)
+
+if [[ -n "$OPERATOR_USER" && "$OPERATOR_USER" != "root" && "$OPERATOR_USER" != "scoring" ]] && id "$OPERATOR_USER" &>/dev/null; then
+    echo "[*] Hardening operator account: $OPERATOR_USER"
+    OPERATOR_PASS=$(gen_pass 20)
+    echo "$OPERATOR_USER:$OPERATOR_PASS" | chpasswd 2>/dev/null || true
+    echo "OPERATOR ${OPERATOR_USER} password: $OPERATOR_PASS" >> "$CRED_FILE"
+    usermod -s /bin/bash "$OPERATOR_USER" 2>/dev/null || true
+    if getent group wheel >/dev/null; then
+        usermod -aG wheel "$OPERATOR_USER" 2>/dev/null || true
+    elif getent group sudo >/dev/null; then
+        usermod -aG sudo "$OPERATOR_USER" 2>/dev/null || true
+    fi
+    for _grp in docker disk shadow adm lxd lxc kvm libvirt; do
+        gpasswd -d "$OPERATOR_USER" "$_grp" 2>/dev/null || true
+    done
+    _home=$(getent passwd "$OPERATOR_USER" | cut -d: -f6)
+    if [[ -n "$_home" && -f "$_home/.ssh/authorized_keys" ]]; then
+        cp "$_home/.ssh/authorized_keys" "$_home/.ssh/authorized_keys.bak.$(date +%s)" 2>/dev/null || true
+        chmod 600 "$_home/.ssh/authorized_keys" 2>/dev/null || true
+        chown "$OPERATOR_USER":"$OPERATOR_USER" "$_home/.ssh/authorized_keys" 2>/dev/null || true
+    fi
+    echo "  [+] Operator rotated, kept admin access, stripped extra privileged groups: $OPERATOR_USER"
+fi
 
 ROOT_PASS=$(gen_pass 20)
 echo "root:$ROOT_PASS" | chpasswd 2>/dev/null || true
